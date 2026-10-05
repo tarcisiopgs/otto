@@ -1,0 +1,17 @@
+# Copy to ~/.config/otto/jobs.toml and adapt.
+# Each job is one agent, one prompt file and one schedule.
+
+[jobs.linear-updates]
+agent = "claude"                       # claude | codex
+prompt = "prompts/linear-updates.md"   # relative to this file
+workdir = "~/Workspace/app"            # where the agent runs
+schedule = { at = "16:05", days = ["mon", "tue", "wed", "thu", "fri"] }
+# Extra arguments for the agent CLI. A scheduled run has nobody to answer
+# permission prompts, so the agent needs its permissions granted up front.
+args = ["--permission-mode", "auto"]
+
+[jobs.morning-triage]
+agent = "codex"
+prompt = "prompts/morning-triage.md"
+workdir = "~/Workspace/app"
+schedule = { at = "07:00" }            # no days: every day

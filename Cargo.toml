@@ -1,0 +1,31 @@
+[package]
+name = "otto"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Scheduled runs for coding agents, on the scheduler your OS already has."
+license = "MIT"
+repository = "https://github.com/tarcisiopgs/otto"
+homepage = "https://github.com/tarcisiopgs/otto"
+keywords = ["agents", "scheduler", "launchd", "automation", "cli"]
+categories = ["command-line-utilities"]
+readme = "README.md"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+# Tests may unwrap (see clippy.toml); production code handles the error.
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
