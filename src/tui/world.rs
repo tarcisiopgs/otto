@@ -305,10 +305,9 @@ impl World for Real {
         let mut warnings = Vec::new();
         let workdir = self.resolved(&spec.workdir);
         if !spec.workdir.is_empty() && !workdir.is_dir() {
-            warnings.push(format!(
-                "working directory not found: {}",
-                workdir.display()
-            ));
+            // As it was typed: the line this is shown on is short, and the
+            // end of a path, which says the most, is what a long one loses.
+            warnings.push(format!("working directory not found: {}", spec.workdir));
         }
         let program = spec.agent.program();
         let on_the_path = self
@@ -704,13 +703,12 @@ schedule = { at = \"07:00\" }
         assert_eq!(
             warnings,
             [
-                format!(
-                    "working directory not found: {}",
-                    dir.path().join("not-there").display()
-                ),
+                // In the user's own words: the line it is shown on is short.
+                "working directory not found: not-there".to_owned(),
                 "claude not found in PATH".to_owned(),
             ]
         );
+        let _ = &dir;
         // A directory is taken from where the jobs file is; none typed yet is
         // not a directory that is missing.
         fs::create_dir(dir.path().join("work")).unwrap();
