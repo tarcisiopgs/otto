@@ -51,9 +51,22 @@ pub enum Weekday {
 }
 
 impl Weekday {
-    fn every_day() -> Vec<Weekday> {
+    pub fn every_day() -> Vec<Weekday> {
         use Weekday::*;
         vec![Mon, Tue, Wed, Thu, Fri, Sat, Sun]
+    }
+
+    /// The same day as the calendar names it.
+    pub fn civil(self) -> jiff::civil::Weekday {
+        match self {
+            Weekday::Mon => jiff::civil::Weekday::Monday,
+            Weekday::Tue => jiff::civil::Weekday::Tuesday,
+            Weekday::Wed => jiff::civil::Weekday::Wednesday,
+            Weekday::Thu => jiff::civil::Weekday::Thursday,
+            Weekday::Fri => jiff::civil::Weekday::Friday,
+            Weekday::Sat => jiff::civil::Weekday::Saturday,
+            Weekday::Sun => jiff::civil::Weekday::Sunday,
+        }
     }
 
     /// launchd counts from Sunday = 0.

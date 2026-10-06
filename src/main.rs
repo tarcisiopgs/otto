@@ -1,5 +1,6 @@
 mod agent;
 mod config;
+mod next;
 mod run;
 mod scheduler;
 mod store;
@@ -18,6 +19,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 use config::Config;
+use next::Next;
 use run::Request;
 use scheduler::runner::System;
 use store::{Outcome, Run, State, Store, Trigger, duration_label};
@@ -123,7 +125,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::List => {
             let store = store()?;
             let now = Timestamp::now();
+            let zone = TimeZone::system();
             for (name, job) in &config.jobs {
+                let state = store.state(name)?;
+                let next = next::next(&job.schedule, state, now, &zone).ok();
                 let last = store
                     .runs(name, &System, now)?
                     .first()
@@ -135,12 +140,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     .map(|day| day.systemd_name())
                     .collect();
                 println!(
-                    "{name}\t{:?}\t{} {}\t{}\t{}\t{last}",
+                    "{name}\t{:?}\t{} {}\t{}\t{}\t{last}\t{}",
                     job.agent,
                     job.schedule.at,
                     days.join(","),
                     job.workdir.display(),
-                    store.state(name)?.label()
+                    state.label(),
+                    next_column(next.as_ref())
                 );
             }
             Ok(ExitCode::SUCCESS)
@@ -294,6 +300,15 @@ fn set_state(store: &Store, job: &str, state: State) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The last column of `otto list`: the local time of the run that will start
+/// the agent, or `-` when no run is coming.
+fn next_column(next: Option<&Next>) -> String {
+    next.and_then(Next::runs_at).map_or_else(
+        || "-".to_owned(),
+        |when| when.strftime("%Y-%m-%d %H:%M").to_string(),
+    )
+}
+
 /// One run as a line of `otto runs`: id, local start, trigger, outcome, duration.
 fn run_line(run: &Run, zone: &TimeZone) -> String {
     let started = run
@@ -358,6 +373,32 @@ mod tests {
             Some("2026-10-05T19:16:26Z"),
         );
         assert!(run_line(&run, &TimeZone::UTC).ends_with("scheduled\tskipped\t-"));
+    }
+
+    #[test]
+    fn the_next_column_is_the_run_that_will_start_the_agent() {
+        let zone = TimeZone::get("America/Sao_Paulo").unwrap();
+        let at = |text: &str| {
+            text.parse::<jiff::civil::DateTime>()
+                .unwrap()
+                .to_zoned(zone.clone())
+                .unwrap()
+        };
+        let today = at("2026-10-06T16:05");
+        let tomorrow = at("2026-10-07T16:05");
+        assert_eq!(
+            next_column(Some(&Next::At(today.clone()))),
+            "2026-10-06 16:05"
+        );
+        assert_eq!(
+            next_column(Some(&Next::Skipping {
+                skipped: today,
+                then: tomorrow
+            })),
+            "2026-10-07 16:05"
+        );
+        assert_eq!(next_column(Some(&Next::Paused)), "-");
+        assert_eq!(next_column(None), "-");
     }
 
     #[test]
