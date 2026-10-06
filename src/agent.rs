@@ -9,14 +9,23 @@ pub enum Agent {
 }
 
 impl Agent {
+    /// The binary of the agent CLI, looked up on the `PATH`.
+    pub fn program(self) -> &'static str {
+        match self {
+            Agent::Claude => "claude",
+            Agent::Codex => "codex",
+        }
+    }
+
     /// The argv of a non-interactive run. `extra` comes from the job (permission
     /// flags, model…) and goes before the prompt, which is always last.
     pub fn command(self, prompt: &str, extra: &[String]) -> Vec<String> {
-        let head: &[&str] = match self {
-            Agent::Claude => &["claude", "-p"],
-            Agent::Codex => &["codex", "exec"],
+        let mode = match self {
+            Agent::Claude => "-p",
+            Agent::Codex => "exec",
         };
-        head.iter()
+        [self.program(), mode]
+            .iter()
             .map(|part| (*part).to_owned())
             .chain(extra.iter().cloned())
             .chain(std::iter::once(prompt.to_owned()))

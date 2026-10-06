@@ -108,12 +108,7 @@ impl Config {
     pub fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<Config> {
         let mut config: Config = toml::from_str(text)?;
         for (name, job) in &mut config.jobs {
-            // The name ends up in service labels and file names.
-            let safe = !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-            if !safe {
+            if !is_job_name(name) {
                 bail!("job name {name:?} must be lowercase letters, digits and dashes");
             }
             job.schedule.time().with_context(|| format!("job {name}"))?;
@@ -131,6 +126,15 @@ impl Config {
             .get(name)
             .with_context(|| format!("no job named {name:?}"))
     }
+}
+
+/// Lowercase letters, digits and dashes: the name ends up in service labels and
+/// file names.
+pub fn is_job_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 fn resolve(path: &Path, base: &Path, home: Option<&Path>) -> PathBuf {
@@ -159,6 +163,22 @@ pub fn default_path() -> Result<PathBuf> {
             .join(".config"),
     };
     Ok(dir.join("otto").join("jobs.toml"))
+}
+
+/// `<xdg_state>/otto/logs`, falling back to `<home>/.local/state/otto/logs`.
+pub fn log_dir_from(xdg_state: Option<&Path>, home: Option<&Path>) -> Result<PathBuf> {
+    let state = match (xdg_state, home) {
+        (Some(dir), _) => dir.to_path_buf(),
+        (None, Some(home)) => home.join(".local").join("state"),
+        (None, None) => bail!("cannot find the home directory to keep logs in"),
+    };
+    Ok(state.join("otto").join("logs"))
+}
+
+/// Where the output of scheduled runs is kept, one file per job.
+pub fn log_dir() -> Result<PathBuf> {
+    let xdg_state = env::var_os("XDG_STATE_HOME").map(PathBuf::from);
+    log_dir_from(xdg_state.as_deref(), home_dir().as_deref())
 }
 
 #[cfg(test)]
@@ -198,6 +218,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{error:#}").contains("job broken"));
+    }
+
+    #[test]
+    fn logs_live_under_the_state_directory() {
+        assert_eq!(
+            log_dir_from(Some(Path::new("/state")), Some(Path::new("/home/me"))).unwrap(),
+            Path::new("/state/otto/logs")
+        );
+        assert_eq!(
+            log_dir_from(None, Some(Path::new("/home/me"))).unwrap(),
+            Path::new("/home/me/.local/state/otto/logs")
+        );
+        assert!(log_dir_from(None, None).is_err());
     }
 
     #[test]

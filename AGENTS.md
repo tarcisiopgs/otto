@@ -22,15 +22,17 @@ cargo run -- --config examples/jobs.toml plan linear-updates
 
 CI (`.github/workflows/ci.yml`) runs Lint, Test (macOS and Linux) and Build for every pull request. The `check` job passes only when all of them pass.
 
-Do not load a unit into launchd or systemd, and do not run a job for real, while testing on a real machine unless the user asks for it in that conversation. `otto plan` and `otto run --dry-run` exist for that.
+Do not load a unit into launchd or systemd, and do not run a job for real, while testing on a real machine unless the user asks for it in that conversation. That rules out a bare `otto sync`. `otto plan`, `otto sync --dry-run` and `otto run --dry-run` exist for that.
 
 ## Layout
 
 ```
-src/main.rs               CLI (clap): list, plan, run
+src/main.rs               CLI (clap): list, sync, plan, run
 src/config.rs             jobs.toml: Config, Job, Schedule, Weekday; parsing, validation, path resolution
 src/agent.rs              Agent: the argv of a non-interactive run of each agent CLI
-src/scheduler/mod.rs      Scheduler trait, Unit, native() picks the backend for this OS
+src/sync.rs               sync: compares the jobs file with the units on disk and applies the difference
+src/scheduler/mod.rs      Scheduler trait, Unit, Context, native() picks the backend for this OS
+src/scheduler/runner.rs   Runner: how a backend runs launchctl/systemctl; Recorder fakes it in tests
 src/scheduler/launchd.rs  macOS LaunchAgent plist
 src/scheduler/systemd.rs  Linux user service + timer
 examples/                 a jobs.toml and a prompt to start from
@@ -41,6 +43,8 @@ examples/                 a jobs.toml and a prompt to start from
 - A new operating system is a new `Scheduler` backend. Nothing outside `src/scheduler/` knows which scheduler is in use.
 - A new agent is a new `Agent` variant with its non-interactive argv. The prompt is always the last argument.
 - Backends return file contents as data (`Unit`), so they are tested without touching the real scheduler.
+- A backend runs `launchctl` or `systemctl` only through `Runner`, and takes its units directory as a field. Tests use `Recorder` and a temporary directory; no test loads a real unit.
+- The units directory is the only state. otto keeps no record of what it scheduled; a unit with otto's prefix is an otto job.
 - Job names are lowercase letters, digits and dashes: they end up in service labels and file names.
 - No `unwrap` or `expect` outside tests; errors carry context with `anyhow`.
 - Commit messages, branch names and pull requests are written in English. Never push to `main` directly: branch, push, open a pull request.
