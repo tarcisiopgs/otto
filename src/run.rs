@@ -5,7 +5,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use jiff::Timestamp;
@@ -15,8 +17,9 @@ use crate::store::{Outcome, State, Store, Trigger};
 
 pub struct Request<'a> {
     pub job: &'a str,
-    /// The command, ready to start: the program and its arguments.
-    pub argv: &'a [String],
+    /// Builds the command to start: the program and its arguments. Called only
+    /// when the run is going to happen, after its record is open.
+    pub command: &'a dyn Fn() -> Result<Vec<String>>,
     pub workdir: &'a Path,
     pub trigger: Trigger,
 }
@@ -63,7 +66,9 @@ pub fn execute(
     // The record names this otto process: it lives exactly as long as the run.
     let run = store.begin(job, request.trigger, std::process::id(), now())?;
     let log = store.log_path(job, &run.id)?;
-    match start(request, &log) {
+    // From here on a failure belongs to this run: nobody watches a scheduled
+    // run, so the reason has to be where `otto log` finds it.
+    match (request.command)().and_then(|argv| start(request, &argv, &log)) {
         Ok(status) => {
             store.finish(job, &run, status.code(), now())?;
             Ok(match status.code() {
@@ -73,6 +78,9 @@ pub fn execute(
             })
         }
         Err(error) => {
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log) {
+                let _ = writeln!(file, "otto: {error:#}");
+            }
             // Closed here, or the job would count as running until someone looked.
             store.finish(job, &run, None, now())?;
             Err(error)
@@ -81,8 +89,13 @@ pub fn execute(
 }
 
 /// Starts the agent and waits for it, with its output kept in `log`.
-fn start(request: &Request, log: &Path) -> Result<ExitStatus> {
-    let (program, args) = request.argv.split_first().context("empty agent command")?;
+fn start(request: &Request, argv: &[String], log: &Path) -> Result<ExitStatus> {
+    let (program, args) = argv.split_first().context("empty agent command")?;
+    // Checked here because the OS reports a missing directory as if the
+    // program were the thing not found.
+    if !request.workdir.is_dir() {
+        bail!("working directory not found: {}", request.workdir.display());
+    }
     let file = File::create(log).with_context(|| format!("cannot write {}", log.display()))?;
     let mut command = Command::new(program);
     // No terminal is attached on a scheduled run, so the agent gets no stdin.
@@ -110,17 +123,40 @@ fn start(request: &Request, log: &Path) -> Result<ExitStatus> {
         .stderr(Stdio::piped())
         .spawn()
         .with_context(cannot_start)?;
-    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
-    thread::scope(|scope| {
-        if let Some(stdout) = stdout {
-            scope.spawn(|| tee(stdout, io::stdout(), log));
+    let (done, drained) = mpsc::channel();
+    let mut copies = 0;
+    if let Some(stdout) = child.stdout.take() {
+        let (done, log) = (done.clone(), log.to_path_buf());
+        thread::spawn(move || {
+            tee(stdout, io::stdout(), &log);
+            let _ = done.send(());
+        });
+        copies += 1;
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let (done, log) = (done.clone(), log.to_path_buf());
+        thread::spawn(move || {
+            tee(stderr, io::stderr(), &log);
+            let _ = done.send(());
+        });
+        copies += 1;
+    }
+    let status = child.wait().with_context(cannot_start)?;
+    // The agent is done. A process it left behind (a dev server, an MCP server)
+    // can hold the pipe open for as long as it lives, so the copies get a
+    // moment to drain what is already written and are then left behind.
+    let deadline = Instant::now() + DRAIN;
+    for _ in 0..copies {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if drained.recv_timeout(left).is_err() {
+            break;
         }
-        if let Some(stderr) = stderr {
-            scope.spawn(|| tee(stderr, io::stderr(), log));
-        }
-    });
-    child.wait().with_context(cannot_start)
+    }
+    Ok(status)
 }
+
+/// How long a manual run waits for its output to drain after the agent exits.
+const DRAIN: Duration = Duration::from_millis(500);
 
 /// Copies a stream to the terminal and appends it to the log. Best effort: a
 /// closed terminal or a full disk does not stop the agent.
@@ -154,7 +190,8 @@ mod tests {
     const NOW: &str = "2026-10-05T19:16:26Z";
 
     struct World {
-        root: TempDir,
+        /// Held so the temporary directory outlives the test.
+        _root: TempDir,
         store: Store,
         workdir: PathBuf,
     }
@@ -166,18 +203,23 @@ mod tests {
             fs::create_dir(&workdir).unwrap();
             let store = Store::new(root.path().join("jobs"));
             World {
-                root,
+                _root: root,
                 store,
                 workdir,
             }
         }
 
-        fn run_at(&self, trigger: Trigger, argv: &[String], now: &str) -> Result<u8> {
+        fn run_with(
+            &self,
+            trigger: Trigger,
+            command: &dyn Fn() -> Result<Vec<String>>,
+            now: &str,
+        ) -> Result<u8> {
             let now: Timestamp = now.parse().unwrap();
             execute(
                 &Request {
                     job: "report",
-                    argv,
+                    command,
                     workdir: &self.workdir,
                     trigger,
                 },
@@ -185,6 +227,10 @@ mod tests {
                 &Recorder::new(),
                 &|| now,
             )
+        }
+
+        fn run_at(&self, trigger: Trigger, argv: &[String], now: &str) -> Result<u8> {
+            self.run_with(trigger, &|| Ok(argv.to_vec()), now)
         }
 
         fn run(&self, trigger: Trigger, argv: &[String]) -> Result<u8> {
@@ -364,7 +410,64 @@ mod tests {
                 .is_running("report", &Recorder::new(), NOW.parse().unwrap())
                 .unwrap()
         );
-        // The root is only kept alive for the directory's lifetime.
-        assert!(world.root.path().exists());
+        assert!(
+            world
+                .log(&world.last())
+                .contains("cannot start otto-no-such-program")
+        );
+    }
+
+    #[test]
+    fn a_missing_working_directory_is_named_in_the_record() {
+        let world = World::new();
+        fs::remove_dir(&world.workdir).unwrap();
+
+        let error = world
+            .run(Trigger::Scheduled, &sh("printf hello"))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("working directory not found"));
+        let run = world.last();
+        assert_eq!(run.outcome, Outcome::Failed);
+        assert!(world.log(&run).contains("working directory not found"));
+    }
+
+    #[test]
+    fn a_command_that_cannot_be_built_still_leaves_a_record() {
+        let world = World::new();
+
+        let error = world
+            .run_with(
+                Trigger::Scheduled,
+                &|| bail!("cannot read prompt /gone/prompt.md"),
+                NOW,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("cannot read prompt"));
+        let run = world.last();
+        assert_eq!(run.outcome, Outcome::Failed);
+        assert!(
+            world
+                .log(&run)
+                .contains("cannot read prompt /gone/prompt.md")
+        );
+    }
+
+    #[test]
+    fn a_manual_run_does_not_wait_for_what_the_agent_left_behind() {
+        let world = World::new();
+        let started = std::time::Instant::now();
+
+        // The background sleep inherits the output pipe and holds it open.
+        let code = world
+            .run(Trigger::Manual, &sh("sleep 5 & printf done"))
+            .unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert_eq!(code, 0);
+        let run = world.last();
+        assert_eq!(run.outcome, Outcome::Ok);
+        assert!(world.log(&run).contains("done"));
     }
 }

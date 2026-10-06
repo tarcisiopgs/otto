@@ -98,7 +98,14 @@ fn context(config_path: &Path) -> Result<scheduler::Context> {
 
 /// What otto remembers about each job, under the state directory.
 fn store() -> Result<Store> {
-    Ok(Store::new(config::state_dir()?.join("jobs")))
+    let store = Store::new(config::state_dir()?.join("jobs"));
+    // Linux lists processes under /proc; elsewhere the store asks `kill`.
+    let procfs = Path::new("/proc");
+    Ok(if procfs.join("self").exists() {
+        store.with_procfs(procfs.to_path_buf())
+    } else {
+        store
+    })
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
@@ -183,9 +190,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             scheduled,
         } => {
             let job = config.job(&name)?;
-            let prompt = fs::read_to_string(&job.prompt)
-                .with_context(|| format!("cannot read prompt {}", job.prompt.display()))?;
+            let read_prompt = || {
+                fs::read_to_string(&job.prompt)
+                    .with_context(|| format!("cannot read prompt {}", job.prompt.display()))
+            };
             if dry_run {
+                read_prompt()?;
                 let shown = format!("<{}>", job.prompt.display());
                 println!(
                     "cd {} && {}",
@@ -194,10 +204,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 );
                 return Ok(ExitCode::SUCCESS);
             }
-            let argv = job.agent.command(&prompt, &job.args);
+            // The prompt is read once the run has a record: a prompt file that
+            // went missing must show up in the history, not only on stderr.
+            let command = || Ok(job.agent.command(&read_prompt()?, &job.args));
             let request = Request {
                 job: &name,
-                argv: &argv,
+                command: &command,
                 workdir: &job.workdir,
                 trigger: if scheduled {
                     Trigger::Scheduled
