@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 
-use super::{Context, Scheduler, Unit};
-use crate::config::{Job, home_dir};
+use super::runner::{Runner, must};
+use super::{Context, Scheduler, Unit, file_names, remove_unit, write_units};
+use crate::config::{Job, home_dir, is_job_name};
 
 /// Linux: a user service plus a timer per job.
 pub struct Systemd {
@@ -16,6 +17,59 @@ impl Systemd {
         Ok(Systemd {
             units_dir: home.join(".config").join("systemd").join("user"),
         })
+    }
+}
+
+/// Every user unit with this prefix belongs to otto.
+const PREFIX: &str = "otto-";
+
+impl Systemd {
+    fn timer(job_name: &str) -> String {
+        format!("{PREFIX}{job_name}.timer")
+    }
+
+    fn service(job_name: &str) -> String {
+        format!("{PREFIX}{job_name}.service")
+    }
+
+    /// Names of the jobs that have an otto service or timer in the directory, sorted.
+    pub fn installed(&self) -> Result<Vec<String>> {
+        let mut names: Vec<String> = file_names(&self.units_dir)?
+            .iter()
+            .filter_map(|name| {
+                let rest = name.strip_prefix(PREFIX)?;
+                rest.strip_suffix(".service")
+                    .or_else(|| rest.strip_suffix(".timer"))
+            })
+            .filter(|job| is_job_name(job))
+            .map(str::to_owned)
+            .collect();
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+
+    /// Writes the units and starts the timer.
+    pub fn load(&self, job_name: &str, units: &[Unit], runner: &dyn Runner) -> Result<()> {
+        write_units(&self.units_dir, units)?;
+        must(runner, "systemctl", &["--user", "daemon-reload"])?;
+        must(
+            runner,
+            "systemctl",
+            &["--user", "enable", "--now", &Systemd::timer(job_name)],
+        )
+    }
+
+    /// Stops the timer and removes the units.
+    pub fn unload(&self, job_name: &str, runner: &dyn Runner) -> Result<()> {
+        let timer = Systemd::timer(job_name);
+        // `disable` fails on a timer systemd has no file for.
+        if self.units_dir.join(&timer).exists() {
+            must(runner, "systemctl", &["--user", "disable", "--now", &timer])?;
+        }
+        remove_unit(&self.units_dir.join(&timer))?;
+        remove_unit(&self.units_dir.join(Systemd::service(job_name)))?;
+        must(runner, "systemctl", &["--user", "daemon-reload"])
     }
 }
 
@@ -46,11 +100,11 @@ impl Scheduler for Systemd {
         );
         Ok(vec![
             Unit {
-                path: self.units_dir.join(format!("otto-{job_name}.service")),
+                path: self.units_dir.join(Systemd::service(job_name)),
                 contents: service,
             },
             Unit {
-                path: self.units_dir.join(format!("otto-{job_name}.timer")),
+                path: self.units_dir.join(Systemd::timer(job_name)),
                 contents: timer,
             },
         ])
@@ -69,10 +123,129 @@ fn quoted(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::Path;
 
     use super::*;
     use crate::config::Config;
+    use crate::scheduler::runner::Recorder;
+
+    fn report_units(dir: &Path) -> Vec<Unit> {
+        vec![
+            Unit {
+                path: dir.join("otto-report.service"),
+                contents: "[Service]\n".to_owned(),
+            },
+            Unit {
+                path: dir.join("otto-report.timer"),
+                contents: "[Timer]\n".to_owned(),
+            },
+        ]
+    }
+
+    #[test]
+    fn installed_lists_each_otto_job_once() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "otto-report.service",
+            "otto-report.timer",
+            "otto-a-b.timer",
+            "other.service",
+            "otto-.timer",
+            "otto-Bad.service",
+        ] {
+            fs::write(dir.path().join(name), "").unwrap();
+        }
+        let systemd = Systemd {
+            units_dir: dir.path().to_path_buf(),
+        };
+        assert_eq!(systemd.installed().unwrap(), ["a-b", "report"]);
+    }
+
+    #[test]
+    fn installed_is_empty_without_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let systemd = Systemd {
+            units_dir: dir.path().join("missing"),
+        };
+        assert!(systemd.installed().unwrap().is_empty());
+    }
+
+    #[test]
+    fn load_writes_both_units_and_enables_the_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let units_dir = dir.path().join("systemd").join("user");
+        let systemd = Systemd {
+            units_dir: units_dir.clone(),
+        };
+        let units = report_units(&units_dir);
+        let runner = Recorder::new();
+
+        systemd.load("report", &units, &runner).unwrap();
+
+        assert!(units.iter().all(|unit| unit.path.exists()));
+        assert_eq!(
+            runner.calls(),
+            [
+                "systemctl --user daemon-reload",
+                "systemctl --user enable --now otto-report.timer"
+            ]
+        );
+    }
+
+    #[test]
+    fn load_reports_a_failed_enable() {
+        let dir = tempfile::tempdir().unwrap();
+        let systemd = Systemd {
+            units_dir: dir.path().to_path_buf(),
+        };
+        let runner = Recorder::new().answering("systemctl --user enable", &[false]);
+        assert!(
+            systemd
+                .load("report", &report_units(dir.path()), &runner)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn unload_disables_the_timer_and_removes_both_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let systemd = Systemd {
+            units_dir: dir.path().to_path_buf(),
+        };
+        let units = report_units(dir.path());
+        for unit in &units {
+            fs::write(&unit.path, &unit.contents).unwrap();
+        }
+        let runner = Recorder::new();
+
+        systemd.unload("report", &runner).unwrap();
+
+        assert_eq!(
+            runner.calls(),
+            [
+                "systemctl --user disable --now otto-report.timer",
+                "systemctl --user daemon-reload"
+            ]
+        );
+        assert!(units.iter().all(|unit| !unit.path.exists()));
+    }
+
+    #[test]
+    fn unload_skips_disable_when_only_the_service_is_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let systemd = Systemd {
+            units_dir: dir.path().to_path_buf(),
+        };
+        let service_path = dir.path().join("otto-report.service");
+        fs::write(&service_path, "[Service]\n").unwrap();
+        let runner = Recorder::new();
+
+        systemd.unload("report", &runner).unwrap();
+
+        assert_eq!(runner.calls(), ["systemctl --user daemon-reload"]);
+        assert!(!service_path.exists());
+    }
 
     fn units_with_path(path: &str) -> Vec<Unit> {
         let config = Config::parse(

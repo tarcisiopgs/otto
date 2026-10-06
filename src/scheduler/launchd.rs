@@ -1,5 +1,3 @@
-use std::fs;
-use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -7,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 
 use super::runner::{Runner, must};
-use super::{Context, Scheduler, Unit};
+use super::{Context, Scheduler, Unit, file_names, remove_unit, write_units};
 use crate::config::{Job, home_dir, is_job_name};
 
 /// macOS: one LaunchAgent per job, in the user's GUI session so the agent CLI
@@ -49,37 +47,21 @@ fn domain(runner: &dyn Runner) -> Result<String> {
 impl Launchd {
     /// Names of the jobs that have an otto plist in the directory, sorted.
     pub fn installed(&self) -> Result<Vec<String>> {
-        let entries = match fs::read_dir(&self.agents_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("cannot read {}", self.agents_dir.display()));
-            }
-        };
-        let mut names = Vec::new();
-        for entry in entries {
-            let file_name = entry?.file_name();
-            let job = file_name
-                .to_str()
-                .and_then(|name| name.strip_prefix(PREFIX))
-                .and_then(|name| name.strip_suffix(".plist"));
-            if let Some(job) = job.filter(|job| is_job_name(job)) {
-                names.push(job.to_owned());
-            }
-        }
+        let mut names: Vec<String> = file_names(&self.agents_dir)?
+            .iter()
+            .filter_map(|name| name.strip_prefix(PREFIX)?.strip_suffix(".plist"))
+            .filter(|job| is_job_name(job))
+            .map(str::to_owned)
+            .collect();
         names.sort();
         Ok(names)
     }
 
     /// Writes the units and loads them into launchd.
     pub fn load(&self, _job_name: &str, units: &[Unit], runner: &dyn Runner) -> Result<()> {
-        fs::create_dir_all(&self.agents_dir)
-            .with_context(|| format!("cannot create {}", self.agents_dir.display()))?;
+        write_units(&self.agents_dir, units)?;
         let domain = domain(runner)?;
         for unit in units {
-            fs::write(&unit.path, &unit.contents)
-                .with_context(|| format!("cannot write {}", unit.path.display()))?;
             must(
                 runner,
                 "launchctl",
@@ -110,12 +92,7 @@ impl Launchd {
                 thread::sleep(GONE_PAUSE);
             }
         }
-        let plist = self.agents_dir.join(format!("{label}.plist"));
-        match fs::remove_file(&plist) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| format!("cannot remove {}", plist.display())),
-        }
+        remove_unit(&self.agents_dir.join(format!("{label}.plist")))
     }
 }
 

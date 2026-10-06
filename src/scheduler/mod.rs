@@ -5,9 +5,11 @@ mod launchd;
 pub mod runner;
 mod systemd;
 
-use std::path::PathBuf;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 
 use crate::config::Job;
 
@@ -43,6 +45,44 @@ pub trait Scheduler {
 
     /// The files that make the OS run `<otto> run <job_name>` on the job's schedule.
     fn units(&self, job_name: &str, job: &Job, ctx: &Context) -> Result<Vec<Unit>>;
+}
+
+/// The file names in a units directory; a directory that does not exist is empty.
+fn file_names(dir: &Path) -> Result<Vec<String>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot read {}", dir.display()));
+        }
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
+        if let Some(name) = entry.file_name().to_str() {
+            names.push(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+/// Removes a unit file; one that is already gone is fine.
+fn remove_unit(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("cannot remove {}", path.display())),
+    }
+}
+
+/// Writes unit files, creating their directory when it is missing.
+fn write_units(dir: &Path, units: &[Unit]) -> Result<()> {
+    fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    for unit in units {
+        fs::write(&unit.path, &unit.contents)
+            .with_context(|| format!("cannot write {}", unit.path.display()))?;
+    }
+    Ok(())
 }
 
 /// The backend for the machine otto is running on.
