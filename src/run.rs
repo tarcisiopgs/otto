@@ -1,6 +1,7 @@
 //! One run of a job: decide whether it happens, start the agent, keep its
 //! output and close the record.
 
+use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -14,6 +15,7 @@ use jiff::Timestamp;
 
 use crate::scheduler::runner::Runner;
 use crate::store::{Outcome, State, Store, Trigger};
+use crate::which;
 
 pub struct Request<'a> {
     pub job: &'a str,
@@ -97,7 +99,14 @@ fn start(request: &Request, argv: &[String], log: &Path) -> Result<ExitStatus> {
         bail!("working directory not found: {}", request.workdir.display());
     }
     let file = File::create(log).with_context(|| format!("cannot write {}", log.display()))?;
-    let mut command = Command::new(program);
+    // Looked up here because Windows only finds a bare name when the file is an
+    // `.exe`, and an agent CLI is often a `.cmd`. A name that is not found is
+    // left to the system, which reports it.
+    let found = env::var_os("PATH").and_then(|path| which::find(program, &path));
+    let mut command = match &found {
+        Some(file) => Command::new(file),
+        None => Command::new(program),
+    };
     // No terminal is attached on a scheduled run, so the agent gets no stdin.
     command
         .args(args)
@@ -176,7 +185,9 @@ fn tee(mut from: impl Read, mut terminal: impl Write, log: &Path) {
     }
 }
 
+// These tests start `sh` in the place of the agent.
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use std::fs;
     use std::path::PathBuf;

@@ -10,9 +10,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Windows too: clippy only sees `#[cfg(windows)]` code when it builds there.
   lint:
-    name: Lint
-    runs-on: macos-latest
+    name: Lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,13 +26,13 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
 
-  # Each scheduler backend only matters on its own OS, so the suite runs on both.
+  # Each scheduler backend only matters on its own OS, so the suite runs on all three.
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -44,11 +48,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
 
+  # The Windows backend has no machine to be tried on, so the runner is that
+  # machine: a real `otto sync` registers a task with Task Scheduler, the task
+  # is run, and its record is read back.
+  windows:
+    name: Windows Task Scheduler
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Sync, run and remove a job for real
+        shell: pwsh
+        run: scripts/windows-smoke.ps1
+
   # `check` is the single status to require on main; it passes only when every job above passes.
   check:
     name: check
     if: always()
-    needs: [lint, test, build]
+    needs: [lint, test, build, windows]
     runs-on: ubuntu-latest
     steps:
       # Require `success` from every job instead of listing the bad results: a job

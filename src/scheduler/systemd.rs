@@ -127,7 +127,9 @@ fn quoted(text: &str) -> String {
     specifiers(text).replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+// The paths these tests compare are written with `/`.
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use std::fs;
     use std::path::Path;

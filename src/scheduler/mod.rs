@@ -4,6 +4,7 @@
 mod launchd;
 pub mod runner;
 mod systemd;
+mod windows;
 
 use std::fs;
 use std::io::ErrorKind;
@@ -101,14 +102,22 @@ fn write_units(dir: &Path, units: &[Unit]) -> Result<()> {
     Ok(())
 }
 
+/// Text placed inside an XML element: a plist value or a task definition.
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// The backend for the machine otto is running on.
 pub fn native() -> Result<Box<dyn Scheduler>> {
     if cfg!(target_os = "macos") {
         Ok(Box::new(launchd::Launchd::for_user()?))
     } else if cfg!(target_os = "linux") {
         Ok(Box::new(systemd::Systemd::for_user()?))
+    } else if cfg!(target_os = "windows") {
+        Ok(Box::new(windows::Windows::for_user()?))
     } else {
-        // Windows Task Scheduler is the planned third backend.
         bail!("no scheduler backend for this platform yet")
     }
 }
