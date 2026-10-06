@@ -132,7 +132,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Sync { dry_run } => {
             let ctx = context(&path)?;
             let scheduler = scheduler::native()?;
-            let outcomes = sync::sync(&config, scheduler.as_ref(), &ctx, &System, dry_run);
+            let store = store()?;
+            let is_running = |job: &str| store.is_running(job, &System, Timestamp::now());
+            let outcomes = sync::sync(
+                &config,
+                scheduler.as_ref(),
+                &ctx,
+                &System,
+                &is_running,
+                dry_run,
+            );
             let mut failed = false;
             for outcome in outcomes {
                 match outcome.result {
