@@ -123,6 +123,7 @@ impl Scheduler for Launchd {
 		<string>{config}</string>
 		<string>run</string>
 		<string>{job_name}</string>
+		<string>--scheduled</string>
 	</array>
 	<key>StartCalendarInterval</key>
 	<array>
@@ -328,6 +329,7 @@ mod tests {
             "/Users/me/.config/otto/jobs.toml",
             "run",
             "report",
+            "--scheduled",
         ];
         let mut from = 0;
         for value in order {

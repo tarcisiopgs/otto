@@ -94,7 +94,7 @@ impl Scheduler for Systemd {
             .collect();
         let log = specifiers(&ctx.log_file(job_name).to_string_lossy());
         let service = format!(
-            "[Unit]\nDescription=otto job {job_name}\n\n[Service]\nType=oneshot\nEnvironment=\"PATH={path}\"\nExecStart=\"{otto}\" --config \"{config}\" run {job_name}\nStandardOutput=append:{log}\nStandardError=append:{log}\n",
+            "[Unit]\nDescription=otto job {job_name}\n\n[Service]\nType=oneshot\nEnvironment=\"PATH={path}\"\nExecStart=\"{otto}\" --config \"{config}\" run {job_name} --scheduled\nStandardOutput=append:{log}\nStandardError=append:{log}\n",
             path = quoted(&ctx.path),
             otto = quoted(&ctx.otto.to_string_lossy()),
             config = quoted(&ctx.config.to_string_lossy()),
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(units.len(), 2);
         let service = &units[0].contents;
         assert!(service.contains(
-            "ExecStart=\"/usr/bin/otto\" --config \"/home/me/my config/jobs.toml\" run report\n"
+            "ExecStart=\"/usr/bin/otto\" --config \"/home/me/my config/jobs.toml\" run report --scheduled\n"
         ));
         assert!(service.contains("Environment=\"PATH=/home/me/bin:/opt/50%%/bin\"\n"));
         assert!(

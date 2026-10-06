@@ -8,13 +8,16 @@ mod sync;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use jiff::Timestamp;
 
 use config::Config;
+use run::Request;
 use scheduler::runner::System;
+use store::{Store, Trigger};
 
 #[derive(Parser)]
 #[command(
@@ -49,6 +52,9 @@ enum Cmd {
         /// Print the agent command instead of running it.
         #[arg(long)]
         dry_run: bool,
+        /// Set by the scheduler unit: honours pause and skip, and keeps the output off the terminal.
+        #[arg(long, conflicts_with = "dry_run")]
+        scheduled: bool,
     },
 }
 
@@ -76,6 +82,11 @@ fn context(config_path: &Path) -> Result<scheduler::Context> {
         path,
         log_dir: config::log_dir()?,
     })
+}
+
+/// What otto remembers about each job, under the state directory.
+fn store() -> Result<Store> {
+    Ok(Store::new(config::state_dir()?.join("jobs")))
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
@@ -138,7 +149,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 ExitCode::SUCCESS
             })
         }
-        Cmd::Run { job: name, dry_run } => {
+        Cmd::Run {
+            job: name,
+            dry_run,
+            scheduled,
+        } => {
             let job = config.job(&name)?;
             let prompt = fs::read_to_string(&job.prompt)
                 .with_context(|| format!("cannot read prompt {}", job.prompt.display()))?;
@@ -152,19 +167,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             let argv = job.agent.command(&prompt, &job.args);
-            let (program, args) = argv.split_first().context("empty agent command")?;
-            // No terminal is attached on a scheduled run, so the agent gets no stdin.
-            let status = Command::new(program)
-                .args(args)
-                .current_dir(&job.workdir)
-                .stdin(Stdio::null())
-                .status()
-                .with_context(|| format!("cannot start {program}"))?;
-            Ok(match status.code() {
-                Some(0) => ExitCode::SUCCESS,
-                Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
-                None => ExitCode::FAILURE,
-            })
+            let request = Request {
+                job: &name,
+                argv: &argv,
+                workdir: &job.workdir,
+                trigger: if scheduled {
+                    Trigger::Scheduled
+                } else {
+                    Trigger::Manual
+                },
+            };
+            let code = run::execute(&request, &store()?, &System, &Timestamp::now)?;
+            Ok(ExitCode::from(code))
         }
     }
 }
