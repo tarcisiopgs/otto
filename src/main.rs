@@ -303,13 +303,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
 }
 
 /// `otto` with no subcommand opens the UI only when both ends are a terminal.
-fn opens_screen(has_command: bool, stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
-    !has_command && stdin_is_terminal && stdout_is_terminal
+fn opens_screen(stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
+    stdin_is_terminal && stdout_is_terminal
 }
 
 /// The terminal UI, or the help where there is no terminal to draw on.
 fn screen(config_path: &Path) -> Result<ExitCode> {
-    if !opens_screen(false, io::stdin().is_terminal(), io::stdout().is_terminal()) {
+    if !opens_screen(io::stdin().is_terminal(), io::stdout().is_terminal()) {
         eprint!("{}", Cli::command().render_help());
         return Ok(ExitCode::from(2));
     }
@@ -405,11 +405,10 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_opens_only_on_a_terminal_and_without_a_subcommand() {
-        assert!(opens_screen(false, true, true));
-        assert!(!opens_screen(true, true, true));
-        assert!(!opens_screen(false, false, true));
-        assert!(!opens_screen(false, true, false));
+    fn the_screen_opens_only_when_both_ends_are_a_terminal() {
+        assert!(opens_screen(true, true));
+        assert!(!opens_screen(false, true));
+        assert!(!opens_screen(true, false));
     }
 
     #[test]

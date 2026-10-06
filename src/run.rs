@@ -160,7 +160,7 @@ fn start(request: &Request, argv: &[String], log: &Path) -> Result<ExitStatus> {
 /// looked up here first. A name that is not found is left to the system,
 /// which reports it.
 #[cfg(windows)]
-fn command_for(program: &str) -> Command {
+pub(crate) fn command_for(program: &str) -> Command {
     let found = std::env::var_os("PATH").and_then(|path| crate::which::find(program, &path));
     match found {
         Some(file) => Command::new(file),
@@ -171,7 +171,7 @@ fn command_for(program: &str) -> Command {
 /// Everywhere else the system's own lookup is the one to trust: it runs after
 /// the working directory changes and skips a file it may not execute.
 #[cfg(not(windows))]
-fn command_for(program: &str) -> Command {
+pub(crate) fn command_for(program: &str) -> Command {
     Command::new(program)
 }
 

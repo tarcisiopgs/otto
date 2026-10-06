@@ -86,22 +86,22 @@ otto log linear-updates <run-id>   # the output of one run
  │ no next run                        ✓ ✓ ·      last ok · 2m 14s
  ├──────────────────────────────────────────────────────────────────
 
- enter open  r run  x stop  p pause  s skip  u resume  e prompt  ? help
+ enter open  x stop  p pause  s skip  u resume  e prompt  ? help  q quit
 ```
 
 | Key | What it does |
 |---|---|
 | `enter` | open the job, then the output of one of its runs |
 | `esc` | go back |
-| `r` | run the job now |
+| `r` | run the job now, when it is not running |
 | `x` | stop the run in progress; `y` confirms |
 | `p` `s` `u` | pause, skip the next scheduled run, resume |
-| `e` | edit the prompt in `$VISUAL` or `$EDITOR` |
+| `e` | edit the prompt in `$VISUAL` or `$EDITOR`; the value may carry arguments (`code -w`) and quotes around a path with a space |
 | `↑` `↓` `k` `j` `pgup` `pgdn` `g` `G` | move |
 | `?` | every key |
 | `q` | quit |
 
-A run started from the screen does not belong to it: it keeps going after you quit, and shows as running when you open otto again. The screen follows the output of a run in progress and loads the last 1 MiB of a long one; `otto log` prints all of it. Colours and other terminal escapes in the output are left out.
+A run started from the screen does not belong to it: it keeps going after you quit, and shows as running when you open otto again. The screen follows the output of a run in progress and loads the last 1 MiB of a long one; `otto log` prints all of it. Colours and other terminal escapes in the output are left out, and a progress line that rewrites itself shows where it ended.
 
 Stopping a run ends the agent and everything it started. otto first checks that the process the record names is still that run, since a record left open by a crash can name a process id the system has given to something else, and refuses when it is not. It also refuses when it cannot end the run as a whole, which is the case for a process that does not lead its own process group. A stopped run is recorded as `interrupted`.
 

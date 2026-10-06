@@ -10,7 +10,8 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::config::{Schedule, Weekday};
 use crate::next::{self, Next};
 use crate::store::{Outcome, Run};
-use crate::tui::app::{App, Confirm, Screen};
+use crate::tui::app::{App, Confirm, ENTRY, Screen};
+use crate::tui::text::{cut, fit, tail, width as width_in_columns, wrapped};
 use crate::tui::world::JobView;
 
 /// The smallest terminal the UI is drawn on: columns, then rows.
@@ -18,9 +19,6 @@ pub const MIN: (u16, u16) = (60, 12);
 
 /// How many of a job's latest runs its strip of marks shows.
 const STRIP: usize = 8;
-
-/// The rows a job takes on the list: two lines and the rule that closes it.
-const ENTRY: usize = 3;
 
 /// The rows of the job screen above its runs: the entry, three facts, a rule.
 const SHEET: usize = 6;
@@ -112,70 +110,6 @@ fn between<'a>(left: Vec<Span<'a>>, right: Vec<Span<'a>>, width: usize) -> Line<
     Line::from(spans)
 }
 
-/// `text` in at most `columns` columns, cut with an ellipsis when longer.
-fn cut(text: &str, columns: usize) -> String {
-    if text.chars().count() <= columns {
-        return text.to_owned();
-    }
-    let kept: String = text.chars().take(columns.saturating_sub(1)).collect();
-    format!("{kept}…")
-}
-
-/// `text` in exactly `columns` columns: padded, or cut with an ellipsis.
-fn fit(text: &str, columns: usize) -> String {
-    format!("{:<columns$}", cut(text, columns))
-}
-
-/// The end of `text` when it is longer than `columns`: a path says the most
-/// in its last parts.
-fn tail(text: &str, columns: usize) -> String {
-    let length = text.chars().count();
-    if length <= columns {
-        return text.to_owned();
-    }
-    let kept: String = text.chars().skip(length + 1 - columns.max(1)).collect();
-    format!("…{kept}")
-}
-
-/// `text` over lines of at most `columns`, broken between words. A word
-/// longer than a line is the only thing cut in two.
-fn wrapped(text: &str, columns: usize) -> Vec<String> {
-    let columns = columns.max(1);
-    let mut lines: Vec<String> = Vec::new();
-    for word in text.split_whitespace() {
-        let mut word: Vec<char> = word.chars().collect();
-        loop {
-            let room = match lines.last() {
-                Some(line) if line.is_empty() => columns,
-                Some(line) => columns.saturating_sub(line.chars().count() + 1),
-                None => 0,
-            };
-            if word.len() <= room {
-                if let Some(line) = lines.last_mut() {
-                    if !line.is_empty() {
-                        line.push(' ');
-                    }
-                    line.extend(word);
-                }
-                break;
-            }
-            // The word starts a line of its own, and fills it when it is
-            // longer than one.
-            if lines.last().is_none_or(|line| !line.is_empty()) {
-                lines.push(String::new());
-                continue;
-            }
-            let rest = word.split_off(columns);
-            if let Some(line) = lines.last_mut() {
-                line.extend(word);
-            }
-            lines.push(String::new());
-            word = rest;
-        }
-    }
-    lines
-}
-
 fn header<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Line<'a> {
     let job = app.selected();
     let name = app.job.as_deref().unwrap_or_default();
@@ -207,11 +141,6 @@ fn header<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Line<'a> 
         },
         Screen::Help => "help".to_owned(),
     };
-    let left = vec![
-        Span::styled(" otto", strong()),
-        Span::styled(" · ", dim()),
-        Span::raw(place),
-    ];
     let right = match (app.screen, run) {
         (Screen::Log, Some(run)) => {
             let mut spans = vec![mark(run), Span::raw(" "), outcome(run)];
@@ -225,6 +154,13 @@ fn header<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Line<'a> 
             vec![Span::styled(clock, dim())]
         }
     };
+    // A long name gives way to what sits at the right edge.
+    let room = width.saturating_sub(width_of(&right) + 10);
+    let left = vec![
+        Span::styled(" otto", strong()),
+        Span::styled(" · ", dim()),
+        Span::raw(cut(&place, room)),
+    ];
     between(left, right, width)
 }
 
@@ -712,7 +648,10 @@ fn notice(app: &App, width: usize) -> Line<'_> {
 fn bar(app: &App, width: usize) -> Line<'_> {
     if let Some(confirm) = &app.confirm {
         let question = match confirm {
-            Confirm::Stop { job, .. } => format!(" stop {job}?"),
+            // Room is kept for the two answers after the name.
+            Confirm::Stop { job, .. } => {
+                format!(" stop {}?", cut(job, width.saturating_sub(34)))
+            }
         };
         return Line::from(vec![
             Span::styled(question, strong()),
@@ -723,46 +662,53 @@ fn bar(app: &App, width: usize) -> Line<'_> {
             Span::styled(" keep running", dim()),
         ]);
     }
-    // The second list always shows: the way back, to the help and out. The
-    // actions give way to it on a narrow terminal, last first.
-    type Keys = &'static [(&'static str, &'static str)];
-    const JOB: Keys = &[
-        ("r", "run"),
-        ("x", "stop"),
+    type Key = (&'static str, &'static str);
+    // A job that is running can be stopped, one that is not can be run: the
+    // bar offers the one that would do something.
+    let running = app.selected().is_some_and(|job| job.running().is_some());
+    let job: [Key; 5] = [
+        if running { ("x", "stop") } else { ("r", "run") },
         ("p", "pause"),
         ("s", "skip"),
         ("u", "resume"),
         ("e", "prompt"),
     ];
-    let (open, actions, always): (Keys, Keys, Keys) = match app.screen {
-        Screen::Jobs => (&[("enter", "open")], JOB, &[("?", "help"), ("q", "quit")]),
-        Screen::Job => (&[("enter", "log")], JOB, &[("esc", "back"), ("?", "help")]),
-        Screen::Log => (
-            &[("↑↓", "scroll")],
-            &[("g", "top"), ("G", "end")],
-            &[("esc", "back"), ("?", "help")],
+    // `always` shows whatever the width: the way back, to the help and out.
+    // The actions give way to it on a narrow terminal, last first.
+    let (actions, always): (Vec<Key>, [Key; 2]) = match app.screen {
+        Screen::Jobs => (
+            [("enter", "open")].into_iter().chain(job).collect(),
+            [("?", "help"), ("q", "quit")],
         ),
-        Screen::Help => (&[], &[], &[("esc", "back"), ("q", "quit")]),
+        Screen::Job => (
+            [("enter", "log")].into_iter().chain(job).collect(),
+            [("esc", "back"), ("?", "help")],
+        ),
+        Screen::Log => (
+            vec![("↑↓", "scroll"), ("g", "top"), ("G", "end")],
+            [("esc", "back"), ("?", "help")],
+        ),
+        Screen::Help => (Vec::new(), [("esc", "back"), ("q", "quit")]),
     };
-    let size = |(key, what): &(&str, &str)| key.chars().count() + 1 + what.chars().count() + 2;
+    let size = |(key, what): &Key| width_in_columns(key) + 1 + width_in_columns(what) + 2;
     let mut room = width
         .saturating_sub(1)
         .saturating_sub(always.iter().map(size).sum::<usize>())
         // The last one needs no gap after it.
         + 2;
-    let mut shown = Vec::new();
-    for item in open.iter().chain(actions) {
-        if size(item) > room {
+    let mut spans = vec![Span::raw(" ")];
+    let mut show = |(key, what): Key| {
+        spans.push(Span::styled(key, strong()));
+        spans.push(Span::styled(format!(" {what}  "), dim()));
+    };
+    for item in actions {
+        if size(&item) > room {
             break;
         }
-        room -= size(item);
-        shown.push(item);
+        room -= size(&item);
+        show(item);
     }
-    let mut spans = vec![Span::raw(" ")];
-    for (key, what) in shown.into_iter().chain(always) {
-        spans.push(Span::styled(*key, strong()));
-        spans.push(Span::styled(format!(" {what}  "), dim()));
-    }
+    always.into_iter().for_each(&mut show);
     Line::from(spans)
 }
 
@@ -1095,9 +1041,61 @@ mod tests {
         let text = screen(&app(vec![job("report")]), 80, 24);
         let bar = text.lines().last().unwrap();
         for word in [
-            "open", "run", "stop", "pause", "skip", "resume", "prompt", "help", "quit",
+            "open", "run", "pause", "skip", "resume", "prompt", "help", "quit",
         ] {
             assert!(bar.contains(word), "{word:?} is missing from {bar:?}");
+        }
+    }
+
+    #[test]
+    fn the_bar_offers_run_or_stop_never_both() {
+        let idle = screen(&app(vec![job("report")]), 80, 24);
+        let bar = idle.lines().last().unwrap();
+        assert!(bar.contains("r run"), "{bar:?}");
+        assert!(!bar.contains("x stop"), "{bar:?}");
+
+        let running = JobView {
+            runs: vec![run("r1", Outcome::Running, Trigger::Manual)],
+            ..job("report")
+        };
+        let mut app = app(vec![running]);
+        let busy = screen(&app, 80, 24);
+        let bar = busy.lines().last().unwrap();
+        assert!(bar.contains("x stop"), "{bar:?}");
+        assert!(!bar.contains("r run"), "{bar:?}");
+        // The job screen follows the same rule.
+        app.act(Action::Open);
+        let opened = screen(&app, 80, 24);
+        let bar = opened.lines().last().unwrap();
+        assert!(bar.contains("x stop") && !bar.contains("r run"), "{bar:?}");
+    }
+
+    #[test]
+    fn a_wide_name_does_not_push_the_line_past_the_edge() {
+        let wide = JobView {
+            job: Job {
+                workdir: PathBuf::from(format!("/work/{}", "日本語".repeat(30))),
+                args: vec!["引数".repeat(40)],
+                ..job("report").job
+            },
+            ..job("日本語のジョブ名前はとても長いです")
+        };
+        let mut app = app(vec![wide]);
+        for open in [false, true] {
+            if open {
+                app.act(Action::Open);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+            terminal.draw(|frame| draw(frame, &app, &now())).unwrap();
+            let buffer = terminal.backend().buffer();
+            // The state sits at the right edge of the first line of the entry,
+            // where a line pushed too far would have lost it.
+            let entry: String = (0..60).map(|x| buffer[(x, 2)].symbol()).collect();
+            assert!(entry.trim_end().ends_with("active"), "{entry:?}");
+            // And the last column of every row is the margin it should be.
+            for y in 2..9 {
+                assert_eq!(buffer[(59, y)].symbol(), " ", "row {y}");
+            }
         }
     }
 
@@ -1138,7 +1136,7 @@ mod tests {
 
     #[test]
     fn a_shortcut_that_does_not_fit_is_left_out_whole() {
-        let text = screen(&app(vec![job("report")]), 76, 24);
+        let text = screen(&app(vec![job("report")]), 68, 24);
         let bar = text.lines().last().unwrap().trim_end();
         // The way to the help and the way out stay; an action gives way.
         assert!(bar.ends_with("? help  q quit"), "{bar:?}");

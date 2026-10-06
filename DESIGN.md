@@ -153,12 +153,16 @@ The last row: key (BOLD), a space, one word (DIM), two spaces.
 
 | Screen | Yields, rightmost first | Never leaves |
 | --- | --- | --- |
-| jobs | `enter open` `r run` `x stop` `p pause` `s skip` `u resume` `e prompt` | `? help` `q quit` |
-| job | `enter log` `r run` `x stop` `p pause` `s skip` `u resume` `e prompt` | `esc back` `? help` |
+| jobs | `enter open` `r run` or `x stop` `p pause` `s skip` `u resume` `e prompt` | `? help` `q quit` |
+| job | `enter log` `r run` or `x stop` `p pause` `s skip` `u resume` `e prompt` | `esc back` `? help` |
 | log | `↑↓ scroll` `g top` `G end` | `esc back` `? help` |
 | help | | `esc back` `q quit` |
 
 The way back and the way to the help or the way out never leave the bar. An action that does not fit is left out whole; it still works and the help lists it.
+
+The bar offers what would do something: `x stop` for a job that is running and `r run` for one that is not, never both.
+
+Width is counted in columns, not characters (`src/tui/text.rs`): a CJK character takes two. A name too long for its place is cut with `…`, in the header and in the question too, so what sits at the right edge stays there.
 
 ### Question
 A question replaces the shortcut bar while the app waits:
@@ -178,7 +182,7 @@ Two columns that fit the eight body rows of the smallest terminal: the action ke
 | --- | --- | --- |
 | `↑` `k` | up one | jobs, job (selection); log (scroll) |
 | `↓` `j` | down one | same |
-| `pgup` `pgdn` | a page | same |
+| `pgup` `pgdn` | a page: on the list, as many jobs as fit | same |
 | `g` `home` | first | same |
 | `G` `end` | last (on the log, follow the end again) | same |
 | `enter` | open the job; then open the output of the selected run | jobs, job |
