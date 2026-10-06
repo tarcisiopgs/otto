@@ -30,7 +30,7 @@ The agent runs on the user's machine with the user's credentials, tools and memo
 
 ## Capabilities and Constraints
 
-Built today (v0.2.0, and the terminal UI not yet released):
+Built today (v0.3.0):
 
 - `~/.config/otto/jobs.toml` describes jobs: agent, prompt file, working directory, schedule (`at` and optional `days`), extra agent arguments.
 - `otto sync` makes the scheduler match the jobs file: it adds, reloads and removes otto's units, and `--dry-run` only reports. Each unit carries the `PATH` of the terminal `sync` ran from. A job with a run in progress is reported as `busy` and left alone.
