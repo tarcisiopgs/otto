@@ -56,6 +56,19 @@ impl Weekday {
         vec![Mon, Tue, Wed, Thu, Fri, Sat, Sun]
     }
 
+    /// The day as the jobs file writes it.
+    pub fn toml_name(self) -> &'static str {
+        match self {
+            Weekday::Mon => "mon",
+            Weekday::Tue => "tue",
+            Weekday::Wed => "wed",
+            Weekday::Thu => "thu",
+            Weekday::Fri => "fri",
+            Weekday::Sat => "sat",
+            Weekday::Sun => "sun",
+        }
+    }
+
     /// The same day as the calendar names it.
     pub fn civil(self) -> jiff::civil::Weekday {
         match self {

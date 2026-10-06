@@ -9,6 +9,9 @@ pub enum Agent {
 }
 
 impl Agent {
+    /// Every agent otto knows, in the order a choice between them is shown.
+    pub const ALL: [Agent; 2] = [Agent::Claude, Agent::Codex];
+
     /// The binary of the agent CLI, looked up on the `PATH`.
     pub fn program(self) -> &'static str {
         match self {

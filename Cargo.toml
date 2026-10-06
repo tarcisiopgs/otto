@@ -18,6 +18,7 @@ jiff = { version = "0.2", features = ["serde"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
+toml_edit = "0.25"
 unicode-segmentation = "1"
 unicode-width = "0.2"
 

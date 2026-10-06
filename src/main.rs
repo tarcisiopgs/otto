@@ -1,5 +1,9 @@
 mod agent;
+mod atomic;
 mod config;
+// Nothing writes the jobs file yet: the job form of the terminal UI will.
+#[allow(dead_code)]
+mod jobs_file;
 mod next;
 mod process;
 mod run;

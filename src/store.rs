@@ -10,6 +10,7 @@ use anyhow::{Context as _, Result, bail};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
+use crate::atomic;
 use crate::scheduler::runner::Runner;
 
 /// What the user asked of a job's schedule.
@@ -94,7 +95,7 @@ impl Store {
 
     pub fn set_state(&self, job: &str, state: State) -> Result<()> {
         let text = toml::to_string(&state).context("cannot encode the job state")?;
-        write_atomic(&self.job_dir(job).join("state.toml"), &text)
+        atomic::write(&self.job_dir(job).join("state.toml"), &text)
     }
 
     /// Opens the record of a run that is about to start the agent.
@@ -278,7 +279,7 @@ impl Store {
 
     fn write(&self, job: &str, run: &Run) -> Result<()> {
         let text = toml::to_string(run).context("cannot encode the run record")?;
-        write_atomic(&self.job_dir(job).join(format!("{}.toml", run.id)), &text)
+        atomic::write(&self.job_dir(job).join(format!("{}.toml", run.id)), &text)
     }
 
     fn prune(&self, job: &str) -> Result<()> {
@@ -422,18 +423,6 @@ fn id_order(id: &str) -> (&str, u32) {
 fn read_run(path: &Path) -> Option<Run> {
     let text = fs::read_to_string(path).ok()?;
     toml::from_str(&text).ok()
-}
-
-/// Writes through a temporary file in the same directory, so a crash leaves
-/// either the old content or the new one, never half of it.
-fn write_atomic(path: &Path, text: &str) -> Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    let temporary = dir.join(name);
-    fs::write(&temporary, text).with_context(|| format!("cannot write {}", temporary.display()))?;
-    fs::rename(&temporary, path).with_context(|| format!("cannot write {}", path.display()))
 }
 
 #[cfg(test)]
