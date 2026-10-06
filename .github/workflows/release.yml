@@ -23,10 +23,17 @@ jobs:
           # Static binaries: one file per architecture runs on any distribution.
           - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          # Experimental: see the README.
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-latest }
     env:
       TAG: ${{ github.event.release.tag_name }}
       GH_TOKEN: ${{ github.token }}
       TARGET: ${{ matrix.target }}
+    # The steps are written for bash, which the Windows runner also has.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -43,12 +50,20 @@ jobs:
       - name: Attach the archive to the release
         run: |
           name="otto-$TARGET"
-          archive="$name.tar.xz"
+          # Windows gets otto.exe in a zip; the others a tar.xz.
+          case "$TARGET" in
+            *windows*) bin=otto.exe; archive="$name.zip" ;;
+            *) bin=otto; archive="$name.tar.xz" ;;
+          esac
           mkdir "$name"
-          cp "target/$TARGET/release/otto" README.md LICENSE "$name/"
-          tar -cJf "$archive" "$name"
-          # `sha256sum` is missing from macOS and `shasum` from some Linux
-          # images; the line is written by hand so it reads the same everywhere.
+          cp "target/$TARGET/release/$bin" README.md LICENSE "$name/"
+          case "$archive" in
+            *.zip) 7z a "$archive" "$name" >/dev/null ;;
+            *) tar -cJf "$archive" "$name" ;;
+          esac
+          # `sha256sum` is missing from macOS and `shasum` from the Windows
+          # runner's bash; the line is written by hand so it reads the same
+          # everywhere.
           if command -v sha256sum >/dev/null; then
             sum=$(sha256sum "$archive" | cut -d " " -f 1)
           else
@@ -92,7 +107,7 @@ jobs:
           set -euo pipefail
           VERSION="${TAG#v}"
           mkdir dl
-          gh release download "$TAG" --pattern 'otto-*.tar.xz' --dir dl
+          gh release download "$TAG" --pattern 'otto-*.tar.xz' --pattern 'otto-*.zip' --dir dl
           # One package carries every binary: trusted publishing cannot create a
           # package name, so a package per platform would need a manual
           # bootstrap for each one.
@@ -100,12 +115,17 @@ jobs:
             "darwin-arm64:aarch64-apple-darwin" \
             "darwin-x64:x86_64-apple-darwin" \
             "linux-arm64:aarch64-unknown-linux-musl" \
-            "linux-x64:x86_64-unknown-linux-musl"; do
+            "linux-x64:x86_64-unknown-linux-musl" \
+            "win32-arm64:aarch64-pc-windows-msvc" \
+            "win32-x64:x86_64-pc-windows-msvc"; do
             IFS=: read -r SYSTEM TARGET <<< "$entry"
-            tar -xJf "dl/otto-$TARGET.tar.xz" -C dl
+            case "$SYSTEM" in
+              win32-*) BIN=otto.exe; unzip -q "dl/otto-$TARGET.zip" -d dl ;;
+              *) BIN=otto; tar -xJf "dl/otto-$TARGET.tar.xz" -C dl ;;
+            esac
             mkdir -p "npm/otto/bin/$SYSTEM"
-            cp "dl/otto-$TARGET/otto" "npm/otto/bin/$SYSTEM/otto"
-            chmod +x "npm/otto/bin/$SYSTEM/otto"
+            cp "dl/otto-$TARGET/$BIN" "npm/otto/bin/$SYSTEM/$BIN"
+            chmod +x "npm/otto/bin/$SYSTEM/$BIN"
           done
           cd npm/otto
           cp ../../LICENSE ../../README.md .
@@ -127,6 +147,9 @@ jobs:
           fi
           for system in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
             test -x "bin/$system/otto"
+          done
+          for system in win32-arm64 win32-x64; do
+            test -f "bin/$system/otto.exe"
           done
       - name: Publish
         working-directory: npm/otto

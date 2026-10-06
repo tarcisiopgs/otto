@@ -72,7 +72,8 @@ if ($LASTEXITCODE -eq 0) { throw 'the task is still registered' }
 Write-Host 'The Windows backend registered, ran, updated and removed a job.'
 
 # An agent CLI installed through npm is a `.cmd`, which Windows runs through
-# cmd.exe. Shown, not required: how such an agent takes a prompt of two lines.
+# cmd.exe, and cmd.exe cannot be handed an argument with a line break. The
+# README states this limit; this pins it, and that the run says why it failed.
 Set-Content "$work\bin\codex.cmd" "@echo off`r`necho fake codex got: %*"
 Set-Content $config @"
 [jobs.batch]
@@ -82,10 +83,9 @@ workdir = "job"
 schedule = { at = "03:00" }
 "@
 & $otto --config $config run batch
-Write-Host "an agent that is a .cmd, with a prompt of two lines: exit $LASTEXITCODE"
-& $otto --config $config runs batch
-& $otto --config $config log batch
+if ($LASTEXITCODE -eq 0) { throw 'a .cmd agent took a prompt of two lines: update the README' }
+Expect (Otto runs batch) 'manual\s+failed'
+Expect (Otto log batch) 'batch file arguments are invalid'
 
-# The step ends with the last native exit code, and the last ones here are
-# allowed to fail.
+# The step would otherwise end with the exit code of the run above.
 exit 0

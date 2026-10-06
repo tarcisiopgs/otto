@@ -10,7 +10,7 @@ The name comes from Otto, the school bus driver: he shows up on schedule. It als
 
 ## Install
 
-otto runs on macOS and Linux, on arm64 and x64. Every way below installs the same native binary; the command is `otto`.
+otto runs on macOS and Linux, on arm64 and x64, and [experimentally on Windows](#windows-experimental). Every way below installs the same native binary; the command is `otto`.
 
 **Homebrew**, on macOS and Linux:
 
@@ -102,6 +102,21 @@ Pause and skip need the unit `otto sync` writes today. After upgrading otto, run
 
 otto keeps the newest 50 runs of each job, in `~/.local/state/otto/jobs/<job>/` (`$XDG_STATE_HOME/otto/jobs` when that is set): a small file per run and its output beside it. Removing a job from the jobs file keeps its history. What otto itself prints during a scheduled run, such as a prompt file it could not read, goes to `~/.local/state/otto/logs/<job>.log`.
 
+## Windows (experimental)
+
+On Windows a job is a task in Task Scheduler, in a folder named `otto`. Install with `npm install -g @tarcisiopgs/otto`, or take the `.zip` of a release. The commands are the same.
+
+**It has never run on a machine someone uses.** What stands behind it is a Windows runner of the CI, where every pull request runs a real `otto sync`: a task is registered, started, its record read back, its schedule changed and the job removed. Treat it as a first version, and please [open an issue](https://github.com/tarcisiopgs/otto/issues) with what you find.
+
+What differs from macOS and Linux:
+
+- **The agent CLI must be an `.exe`, or the prompt one line.** An agent installed through npm is a `.cmd`, and Windows cannot hand a `.cmd` an argument with a line break. Such a run is recorded as `failed`, and `otto log` says `batch file arguments are invalid`.
+- **A run that was missed is not made up for.** If the machine is off at the scheduled time, that run does not happen.
+- **A job runs only while you are logged on.**
+- **The job gets your own environment**, the one Windows keeps for your user, and not the `PATH` of the terminal `otto sync` ran from. After installing an agent CLI, a new terminal has it; so does the next run.
+- **Task Scheduler is not read back.** otto keeps the definition of each task it registered in its own folder and compares against that. A task deleted by hand in Task Scheduler still shows as `unchanged`; remove the job from the jobs file, sync, add it back and sync again.
+- The jobs file is `%USERPROFILE%\.config\otto\jobs.toml`, and what otto remembers is under `%USERPROFILE%\.local\state\otto`.
+
 ## Build from source
 
 ```sh
@@ -116,7 +131,7 @@ Requires Rust 1.88 or newer.
 - Notifications when a run starts, finishes, fails or is skipped.
 - Prechecks (a command that decides whether today's run happens) and a missed-run grace window.
 - A terminal UI to see every job, run one now, pause it, read its log and edit its prompt.
-- Windows Task Scheduler backend.
+- Windows out of experimental, with Scoop and winget packages.
 
 ## License
 

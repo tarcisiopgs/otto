@@ -7,7 +7,14 @@ const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const supported = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"];
+const supported = [
+  "darwin-arm64",
+  "darwin-x64",
+  "linux-arm64",
+  "linux-x64",
+  "win32-arm64",
+  "win32-x64",
+];
 const system = `${process.platform}-${process.arch}`;
 
 if (!supported.includes(system)) {
@@ -15,7 +22,8 @@ if (!supported.includes(system)) {
   process.exit(1);
 }
 
-const binary = path.join(__dirname, system, "otto");
+const file = process.platform === "win32" ? "otto.exe" : "otto";
+const binary = path.join(__dirname, system, file);
 if (!fs.existsSync(binary)) {
   console.error(`otto: the ${system} binary is missing from this install. Reinstall the package.`);
   process.exit(1);
