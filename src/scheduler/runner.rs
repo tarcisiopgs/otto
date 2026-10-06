@@ -3,7 +3,7 @@
 
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug)]
 pub struct Output {
@@ -16,6 +16,19 @@ pub trait Runner {
     /// Runs `program` with `args` and waits for it. `Err` only when the process
     /// could not be started; a failing exit status is `success: false`.
     fn run(&self, program: &str, args: &[&str]) -> Result<Output>;
+}
+
+/// Runs a command that has to succeed; a failing exit carries its stderr.
+pub fn must(runner: &dyn Runner, program: &str, args: &[&str]) -> Result<()> {
+    let output = runner.run(program, args)?;
+    if !output.success {
+        bail!(
+            "{program} {} failed: {}",
+            args.join(" "),
+            output.stderr.trim()
+        );
+    }
+    Ok(())
 }
 
 /// Runs the command for real.

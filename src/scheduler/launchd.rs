@@ -1,9 +1,14 @@
+use std::fs;
+use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 
+use super::runner::{Runner, must};
 use super::{Context, Scheduler, Unit};
-use crate::config::{Job, home_dir};
+use crate::config::{Job, home_dir, is_job_name};
 
 /// macOS: one LaunchAgent per job, in the user's GUI session so the agent CLI
 /// can reach the login keychain.
@@ -20,8 +25,98 @@ impl Launchd {
     }
 }
 
+/// Every LaunchAgent with this prefix belongs to otto.
+const PREFIX: &str = "io.github.tarcisiopgs.otto.";
+
+/// How long `unload` waits for launchd to finish tearing a job down.
+const GONE_ATTEMPTS: u32 = 50;
+const GONE_PAUSE: Duration = Duration::from_millis(100);
+
 pub fn label(job_name: &str) -> String {
-    format!("io.github.tarcisiopgs.otto.{job_name}")
+    format!("{PREFIX}{job_name}")
+}
+
+/// The launchd domain of the logged-in user, `gui/<uid>`.
+fn domain(runner: &dyn Runner) -> Result<String> {
+    let output = runner.run("id", &["-u"])?;
+    let uid = output.stdout.trim();
+    if !output.success || uid.is_empty() {
+        bail!("cannot find the user id: {}", output.stderr.trim());
+    }
+    Ok(format!("gui/{uid}"))
+}
+
+impl Launchd {
+    /// Names of the jobs that have an otto plist in the directory, sorted.
+    pub fn installed(&self) -> Result<Vec<String>> {
+        let entries = match fs::read_dir(&self.agents_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("cannot read {}", self.agents_dir.display()));
+            }
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let file_name = entry?.file_name();
+            let job = file_name
+                .to_str()
+                .and_then(|name| name.strip_prefix(PREFIX))
+                .and_then(|name| name.strip_suffix(".plist"));
+            if let Some(job) = job.filter(|job| is_job_name(job)) {
+                names.push(job.to_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// Writes the units and loads them into launchd.
+    pub fn load(&self, _job_name: &str, units: &[Unit], runner: &dyn Runner) -> Result<()> {
+        fs::create_dir_all(&self.agents_dir)
+            .with_context(|| format!("cannot create {}", self.agents_dir.display()))?;
+        let domain = domain(runner)?;
+        for unit in units {
+            fs::write(&unit.path, &unit.contents)
+                .with_context(|| format!("cannot write {}", unit.path.display()))?;
+            must(
+                runner,
+                "launchctl",
+                &["bootstrap", &domain, &unit.path.to_string_lossy()],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Unloads the job from launchd and removes its plist.
+    pub fn unload(&self, job_name: &str, runner: &dyn Runner) -> Result<()> {
+        let label = label(job_name);
+        let target = format!("{}/{label}", domain(runner)?);
+        let loaded = |runner: &dyn Runner| -> Result<bool> {
+            Ok(runner.run("launchctl", &["print", &target])?.success)
+        };
+        // `bootout` fails on a job that is not loaded, so ask first.
+        if loaded(runner)? {
+            must(runner, "launchctl", &["bootout", &target])?;
+            // launchd tears the job down in the background, and a `bootstrap`
+            // that arrives before it finishes fails with an I/O error.
+            let mut attempts = 0;
+            while loaded(runner)? {
+                attempts += 1;
+                if attempts >= GONE_ATTEMPTS {
+                    bail!("{label} is still loaded after bootout");
+                }
+                thread::sleep(GONE_PAUSE);
+            }
+        }
+        let plist = self.agents_dir.join(format!("{label}.plist"));
+        match fs::remove_file(&plist) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("cannot remove {}", plist.display())),
+        }
+    }
 }
 
 impl Scheduler for Launchd {
@@ -99,10 +194,128 @@ fn escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::Path;
 
     use super::*;
     use crate::config::Config;
+    use crate::scheduler::runner::Recorder;
+
+    const LABEL: &str = "io.github.tarcisiopgs.otto.report";
+
+    fn report_units(dir: &Path) -> Vec<Unit> {
+        vec![Unit {
+            path: dir.join(format!("{LABEL}.plist")),
+            contents: "<plist/>".to_owned(),
+        }]
+    }
+
+    #[test]
+    fn installed_lists_only_otto_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "io.github.tarcisiopgs.otto.report.plist",
+            "io.github.tarcisiopgs.otto.a-b.plist",
+            "com.apple.other.plist",
+            "io.github.tarcisiopgs.otto..plist",
+            "io.github.tarcisiopgs.otto.Bad.plist",
+        ] {
+            fs::write(dir.path().join(name), "").unwrap();
+        }
+        let launchd = Launchd {
+            agents_dir: dir.path().to_path_buf(),
+        };
+        assert_eq!(launchd.installed().unwrap(), ["a-b", "report"]);
+    }
+
+    #[test]
+    fn installed_is_empty_without_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let launchd = Launchd {
+            agents_dir: dir.path().join("missing"),
+        };
+        assert!(launchd.installed().unwrap().is_empty());
+    }
+
+    #[test]
+    fn load_writes_the_plist_and_bootstraps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents_dir = dir.path().join("nested").join("LaunchAgents");
+        let launchd = Launchd {
+            agents_dir: agents_dir.clone(),
+        };
+        let units = report_units(&agents_dir);
+        let runner = Recorder::new();
+
+        launchd.load("report", &units, &runner).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&units[0].path).unwrap(),
+            units[0].contents
+        );
+        assert_eq!(
+            runner.calls(),
+            [
+                "id -u".to_owned(),
+                format!("launchctl bootstrap gui/501 {}", units[0].path.display())
+            ]
+        );
+    }
+
+    #[test]
+    fn load_reports_a_failed_bootstrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let launchd = Launchd {
+            agents_dir: dir.path().to_path_buf(),
+        };
+        let runner = Recorder::new().answering("launchctl bootstrap", &[false]);
+        assert!(
+            launchd
+                .load("report", &report_units(dir.path()), &runner)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn unload_waits_until_the_service_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let launchd = Launchd {
+            agents_dir: dir.path().to_path_buf(),
+        };
+        let plist_path = report_units(dir.path()).remove(0).path;
+        fs::write(&plist_path, "<plist/>").unwrap();
+        let runner = Recorder::new().answering("launchctl print", &[true, true, false]);
+
+        launchd.unload("report", &runner).unwrap();
+
+        assert_eq!(
+            runner.calls(),
+            [
+                "id -u".to_owned(),
+                format!("launchctl print gui/501/{LABEL}"),
+                format!("launchctl bootout gui/501/{LABEL}"),
+                format!("launchctl print gui/501/{LABEL}"),
+                format!("launchctl print gui/501/{LABEL}"),
+            ]
+        );
+        assert!(!plist_path.exists());
+    }
+
+    #[test]
+    fn unload_removes_the_plist_of_a_job_that_is_not_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let launchd = Launchd {
+            agents_dir: dir.path().to_path_buf(),
+        };
+        let plist_path = report_units(dir.path()).remove(0).path;
+        fs::write(&plist_path, "<plist/>").unwrap();
+        let runner = Recorder::new().answering("launchctl print", &[false]);
+
+        launchd.unload("report", &runner).unwrap();
+
+        assert!(!runner.calls().iter().any(|call| call.contains("bootout")));
+        assert!(!plist_path.exists());
+    }
 
     #[test]
     fn one_interval_per_day_and_otto_as_the_program() {

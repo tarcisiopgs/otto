@@ -108,12 +108,7 @@ impl Config {
     pub fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<Config> {
         let mut config: Config = toml::from_str(text)?;
         for (name, job) in &mut config.jobs {
-            // The name ends up in service labels and file names.
-            let safe = !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-            if !safe {
+            if !is_job_name(name) {
                 bail!("job name {name:?} must be lowercase letters, digits and dashes");
             }
             job.schedule.time().with_context(|| format!("job {name}"))?;
@@ -131,6 +126,15 @@ impl Config {
             .get(name)
             .with_context(|| format!("no job named {name:?}"))
     }
+}
+
+/// Lowercase letters, digits and dashes: the name ends up in service labels and
+/// file names.
+pub fn is_job_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 fn resolve(path: &Path, base: &Path, home: Option<&Path>) -> PathBuf {
