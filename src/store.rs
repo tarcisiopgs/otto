@@ -80,7 +80,7 @@ impl Store {
     /// Opens the record of a run that is about to start the agent.
     pub fn begin(&self, job: &str, trigger: Trigger, pid: u32, now: Timestamp) -> Result<Run> {
         let run = Run {
-            id: self.new_id(job, now),
+            id: self.new_id(job, now)?,
             started: now,
             finished: None,
             trigger,
@@ -101,7 +101,7 @@ impl Store {
         now: Timestamp,
     ) -> Result<Run> {
         let run = Run {
-            id: self.new_id(job, now),
+            id: self.new_id(job, now)?,
             started: now,
             finished: Some(now),
             trigger,
@@ -154,7 +154,13 @@ impl Store {
                 // The run may have closed its own record while the process was
                 // being checked: read it again before calling it interrupted.
                 // A process that is gone writes nothing more, so this settles it.
-                match read_run(&path) {
+                let current = match fs::read_to_string(&path) {
+                    Ok(text) => toml::from_str::<Run>(&text).ok(),
+                    // Pruned in the meantime: writing it back would resurrect it.
+                    Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                    Err(_) => None,
+                };
+                match current {
                     Some(current) if current.outcome != Outcome::Running => run = current,
                     _ => {
                         run.outcome = Outcome::Interrupted;
@@ -218,21 +224,26 @@ impl Store {
                 ids.push(id.to_owned());
             }
         }
-        ids.sort_by(|a, b| b.cmp(a));
+        ids.sort_by(|a, b| id_order(b).cmp(&id_order(a)));
         Ok(ids)
     }
 
-    /// The start time as an id; a second run in the same second gets a suffix.
-    fn new_id(&self, job: &str, now: Timestamp) -> String {
-        let base = now.strftime("%Y%m%dT%H%M%SZ").to_string();
-        let dir = self.job_dir(job);
-        let mut id = base.clone();
-        let mut next = 2;
-        while dir.join(format!("{id}.toml")).exists() {
-            id = format!("{base}-{next}");
-            next += 1;
-        }
-        id
+    /// The start time as an id; a later run in the same second gets a suffix
+    /// one past the highest in use. Reusing a freed suffix would make a new
+    /// run sort as an old one, and pruning would take it first.
+    fn new_id(&self, job: &str, now: Timestamp) -> Result<String> {
+        let second = now.strftime("%Y%m%dT%H%M%SZ").to_string();
+        let last = self
+            .ids(job)?
+            .iter()
+            .map(|id| id_order(id))
+            .filter(|(taken, _)| *taken == second)
+            .map(|(_, place)| place)
+            .max();
+        Ok(match last {
+            Some(place) => format!("{second}-{}", place + 1),
+            None => second,
+        })
     }
 
     fn write(&self, job: &str, run: &Run) -> Result<()> {
@@ -349,6 +360,15 @@ fn is_run_id(text: &str) -> bool {
         && text
             .chars()
             .all(|c| c.is_ascii_digit() || matches!(c, 'T' | 'Z' | '-'))
+}
+
+/// The time order of an id: its second, then its place within that second.
+/// Plain text order would put `-9` after `-12`.
+fn id_order(id: &str) -> (&str, u32) {
+    match id.split_once('-') {
+        Some((second, place)) => (second, place.parse().unwrap_or(0)),
+        None => (id, 1),
+    }
 }
 
 /// A record that cannot be read or understood is `None`.
@@ -659,6 +679,86 @@ mod tests {
             .runs("report", &alive(), at("2026-10-05T19:06:00Z"))
             .unwrap();
         assert_eq!(later[0].outcome, Outcome::Ok);
+    }
+
+    /// A process check during which the record is pruned away.
+    struct PrunedMeanwhile {
+        record: PathBuf,
+    }
+
+    impl Runner for PrunedMeanwhile {
+        fn run(&self, _program: &str, _args: &[&str]) -> Result<Output> {
+            fs::remove_file(&self.record)?;
+            Ok(Output {
+                success: false,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn a_record_removed_while_being_checked_is_not_brought_back() {
+        let (dir, store) = store();
+        let run = store
+            .begin(
+                "report",
+                Trigger::Scheduled,
+                4242,
+                at("2026-10-05T19:00:00Z"),
+            )
+            .unwrap();
+        let record = dir.path().join(format!("report/{}.toml", run.id));
+        let pruning = PrunedMeanwhile {
+            record: record.clone(),
+        };
+
+        let seen = store
+            .runs("report", &pruning, at("2026-10-05T19:05:00Z"))
+            .unwrap();
+
+        assert!(seen.is_empty());
+        assert!(!record.exists());
+    }
+
+    #[test]
+    fn runs_in_the_same_second_keep_their_order_past_nine() {
+        let (_dir, store) = store();
+        let now = at("2026-10-05T19:00:00Z");
+        for _ in 0..12 {
+            store
+                .record("report", Trigger::Scheduled, Outcome::Paused, now)
+                .unwrap();
+        }
+        let ids: Vec<String> = store
+            .runs("report", &alive(), now)
+            .unwrap()
+            .into_iter()
+            .map(|run| run.id)
+            .collect();
+        assert_eq!(ids[0], "20261005T190000Z-12");
+        assert_eq!(ids[1], "20261005T190000Z-11");
+        assert_eq!(ids[3], "20261005T190000Z-9");
+        assert_eq!(ids[11], "20261005T190000Z");
+    }
+
+    #[test]
+    fn pruning_in_a_busy_second_drops_the_oldest_runs() {
+        let (_dir, store) = store();
+        let now = at("2026-10-05T19:00:00Z");
+        for _ in 0..55 {
+            let run = store.begin("report", Trigger::Scheduled, 1, now).unwrap();
+            store.finish("report", &run, Some(0), now).unwrap();
+        }
+        let ids: Vec<String> = store
+            .runs("report", &alive(), now)
+            .unwrap()
+            .into_iter()
+            .map(|run| run.id)
+            .collect();
+        assert_eq!(ids.len(), KEEP);
+        assert_eq!(ids[0], "20261005T190000Z-55");
+        assert_eq!(ids[KEEP - 1], "20261005T190000Z-6");
     }
 
     /// A machine without a `kill` program.
