@@ -72,8 +72,8 @@ pub trait World {
     fn set_state(&self, job: &str, state: State) -> Result<()>;
     /// Starts a manual run of `job` that does not depend on this process.
     fn start(&mut self, job: &str) -> Result<()>;
-    /// Stops the run owned by process `pid`.
-    fn stop(&self, pid: u32) -> Result<()>;
+    /// Stops the run of `job` owned by process `pid`.
+    fn stop(&self, job: &str, pid: u32) -> Result<()>;
     /// Opens `path` in the user's editor and waits for it to close.
     fn edit(&self, path: &Path) -> Result<()>;
 }
@@ -229,6 +229,9 @@ impl World for Real {
     }
 
     fn start(&mut self, job: &str) -> Result<()> {
+        // The run has no terminal to complain on: what would stop it before
+        // it opens its record is checked here, where the screen can say it.
+        Config::load(&self.setup.config)?.job(job)?;
         let mut command = Command::new(&self.setup.otto);
         command
             .arg("--config")
@@ -239,8 +242,8 @@ impl World for Real {
         Ok(())
     }
 
-    fn stop(&self, pid: u32) -> Result<()> {
-        process::stop_group(pid, self.setup.runner.as_ref())
+    fn stop(&self, job: &str, pid: u32) -> Result<()> {
+        process::stop_group(pid, job, self.setup.runner.as_ref())
     }
 
     fn edit(&self, path: &Path) -> Result<()> {
@@ -277,7 +280,9 @@ pub fn printable(bytes: &[u8]) -> String {
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            ESCAPE => match chars.next() {
+            // An escape followed by a control character is cut short: the
+            // line feed after it is still a line feed.
+            ESCAPE => match chars.next_if(|next| !next.is_control()) {
                 // Control sequence: parameters, then one final byte.
                 Some('[') => {
                     for c in chars.by_ref() {
@@ -286,9 +291,10 @@ pub fn printable(bytes: &[u8]) -> String {
                         }
                     }
                 }
-                // Operating system command: ends at a bell or at `ESC \`.
+                // Operating system command: ends at a bell or at `ESC \`. One
+                // that is never closed ends with its line.
                 Some(']') => {
-                    while let Some(c) = chars.next() {
+                    while let Some(c) = chars.next_if(|next| *next != '\n') {
                         if c == BELL {
                             break;
                         }
@@ -297,6 +303,11 @@ pub fn printable(bytes: &[u8]) -> String {
                             break;
                         }
                     }
+                }
+                // Intermediate bytes, then one final byte: `ESC ( B`.
+                Some(' '..='/') => {
+                    while chars.next_if(|next| (' '..='/').contains(next)).is_some() {}
+                    chars.next_if(|next| !next.is_control());
                 }
                 // Any other escape is two characters long.
                 _ => {}
@@ -352,8 +363,8 @@ impl World for Fake {
         self.call(format!("start {job}"))
     }
 
-    fn stop(&self, pid: u32) -> Result<()> {
-        self.call(format!("stop {pid}"))
+    fn stop(&self, job: &str, pid: u32) -> Result<()> {
+        self.call(format!("stop {job} {pid}"))
     }
 
     fn edit(&self, path: &Path) -> Result<()> {
@@ -369,7 +380,7 @@ mod tests {
     use crate::scheduler::runner::Recorder;
     use crate::store::Trigger;
 
-    const JOBS: &str = "\
+    pub(super) const JOBS: &str = "\
 [jobs.report]
 agent = \"claude\"
 prompt = \"report.md\"
@@ -420,6 +431,26 @@ schedule = { at = \"07:00\" }
         assert_eq!(printable(b"\x1b]0;title\x07after"), "after");
         assert_eq!(printable(b"\x1b]8;;http://x\x1b\\link"), "link");
         assert_eq!(printable(b"a\xffb"), "a\u{fffd}b");
+    }
+
+    #[test]
+    fn a_broken_escape_does_not_eat_the_output() {
+        // The character-set reset tput prints, three bytes long.
+        assert_eq!(printable(b"\x1b(B\x1b[mhello"), "hello");
+        assert_eq!(printable(b"a\x1b\nb"), "a\nb");
+        // A title that is never closed ends with its line.
+        assert_eq!(printable(b"\x1b]0;never closed\nnext line"), "\nnext line");
+    }
+
+    #[test]
+    fn a_run_is_not_started_for_a_job_the_file_no_longer_has() {
+        let (dir, mut real, _store) = machine(Some(JOBS));
+        let error = real.start("gone").unwrap_err();
+        assert!(format!("{error:#}").contains("no job named"));
+
+        fs::write(dir.path().join("jobs.toml"), "jobs = 3\n").unwrap();
+        let error = real.start("report").unwrap_err();
+        assert!(format!("{error:#}").contains("invalid config"));
     }
 
     #[test]
@@ -607,7 +638,7 @@ mod unix_tests {
 
     use tempfile::TempDir;
 
-    use super::tests::setup;
+    use super::tests::{JOBS, setup};
     use super::*;
     use crate::scheduler::runner::{Recorder, System};
 
@@ -640,6 +671,7 @@ mod unix_tests {
     #[test]
     fn start_runs_otto_with_the_same_jobs_file() {
         let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("jobs.toml"), JOBS).unwrap();
         let mut real = Real::new(Setup {
             otto: script(&dir, "\"$@\""),
             ..setup(&dir, Box::new(Recorder::new()))
@@ -657,6 +689,7 @@ mod unix_tests {
     #[test]
     fn a_child_that_ended_is_gone_by_the_next_snapshot() {
         let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("jobs.toml"), JOBS).unwrap();
         let mut real = Real::new(Setup {
             otto: script(&dir, "$$"),
             ..setup(&dir, Box::new(System))

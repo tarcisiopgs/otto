@@ -29,12 +29,19 @@ Do not load a unit into launchd or systemd, and do not run a job for real, while
 ## Layout
 
 ```
-src/main.rs               CLI (clap): list, sync, plan, run, skip, pause, resume, runs, log
+src/main.rs               CLI (clap): list, sync, plan, run, skip, pause, resume, runs, log; no subcommand opens the terminal UI
 src/store.rs              Store: per-job state (paused, skip next) and run records under the state directory
 src/run.rs                one run of a job: pause/skip/busy, start the agent, keep its output, close the record
 src/config.rs             jobs.toml: Config, Job, Schedule, Weekday; parsing, validation, path resolution
 src/agent.rs              Agent: the argv of a non-interactive run of each agent CLI
 src/sync.rs               sync: compares the jobs file with the units on disk and applies the difference
+src/next.rs               when a job runs next, from its schedule and state
+src/process.rs            starts a run that outlives the terminal UI, stops a run as a process group
+src/tui/mod.rs            the terminal UI: takes the terminal, runs the event loop, gives it back
+src/tui/app.rs            App: the state of the UI; actions in, effects out
+src/tui/view.rs           draws the state; the look is in DESIGN.md
+src/tui/keys.rs           which key asks for which action
+src/tui/world.rs          World: everything the UI reads from disk or asks of a process
 src/scheduler/mod.rs      Scheduler trait, Unit, Context, native() picks the backend for this OS
 src/scheduler/runner.rs   Runner: how a backend runs launchctl/systemctl; Recorder fakes it in tests
 src/scheduler/launchd.rs  macOS LaunchAgent plist
@@ -71,6 +78,11 @@ Do not create a release or publish to npm unless the user asks for it in that co
 - Only `src/store.rs` knows the layout of the state directory. It takes its root as a parameter, so tests use a temporary directory.
 - Code that needs the time takes it as a parameter (`jiff::Timestamp`); only `main.rs` reads the clock.
 - Tests never start a real agent. `run::execute` takes the command ready to start, and tests give it `sh -c`.
+- Every effect of the terminal UI goes through `World`. `src/tui/app.rs` and `src/tui/view.rs` read no file, no clock and no environment variable; tests give the UI `world::Fake` and draw on ratatui's `TestBackend`, so none needs a terminal.
+- The UI keeps its selection by job name and run id, never by index: the list changes under it every second.
+- A run is stopped as a process group, through `Runner`. Its record names the `otto run` process, and ending that alone leaves the agent running. Before the signal, the process is checked to be `otto … run <job>`: a stale record can name a process id that now belongs to something else.
+- A process otto starts and does not wait for is collected later (`Children::reap`). One that ended and was not collected still answers as alive.
+- `ratatui` brings `crossterm` (`ratatui::crossterm`). Do not add `crossterm` as a dependency of its own: two versions give two incompatible sets of event types.
 - The suite also runs on Windows. A test module that needs a Unix (execute bits, `sh`, paths written with `/`) carries `#[cfg(test)]` and `#[cfg(unix)]` as two attributes: clippy only treats a module as test code when it sees `#[cfg(test)]` on its own.
 - Job names are lowercase letters, digits and dashes: they end up in service labels and file names.
 - No `unwrap` or `expect` outside tests; errors carry context with `anyhow`.

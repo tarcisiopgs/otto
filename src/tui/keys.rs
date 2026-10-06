@@ -10,14 +10,19 @@ pub fn action(key: KeyEvent, app: &App) -> Option<Action> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
     if app.confirm.is_some() {
+        // Only `y` says yes: Enter is too easy to press for a question that
+        // stops a run. Ctrl-C backs out of the question, not of otto.
         return match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => Some(Action::Yes),
+            KeyCode::Char('c') if control => Some(Action::No),
+            _ if control => None,
+            KeyCode::Char('y') => Some(Action::Yes),
             KeyCode::Char('n') | KeyCode::Esc => Some(Action::No),
             _ => None,
         };
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    if control {
         return (key.code == KeyCode::Char('c')).then_some(Action::Quit);
     }
     Some(match key.code {
@@ -126,7 +131,10 @@ mod tests {
         app.act(Action::Stop);
         assert!(app.confirm.is_some());
         assert_eq!(action(press(KeyCode::Char('y')), &app), Some(Action::Yes));
-        assert_eq!(action(press(KeyCode::Enter), &app), Some(Action::Yes));
+        // Enter is too easy to press for a question that stops a run.
+        assert_eq!(action(press(KeyCode::Enter), &app), None);
+        let control_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(action(control_c, &app), Some(Action::No));
         assert_eq!(action(press(KeyCode::Char('n')), &app), Some(Action::No));
         assert_eq!(action(press(KeyCode::Esc), &app), Some(Action::No));
         assert_eq!(action(press(KeyCode::Char('q')), &app), None);

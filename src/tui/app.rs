@@ -45,7 +45,7 @@ pub enum Action {
 pub enum Effect {
     SetState { job: String, state: State },
     Start { job: String },
-    Stop { pid: u32 },
+    Stop { job: String, pid: u32 },
     Edit { path: PathBuf },
     Quit,
 }
@@ -77,6 +77,8 @@ pub struct App {
     pub top: usize,
     /// How many lines a page moves by: the height of what scrolls.
     pub page: usize,
+    /// How many columns a line of the log has before it goes on in the next row.
+    pub columns: usize,
     pub confirm: Option<Confirm>,
     pub notice: Option<Notice>,
     /// Where `Back` leaves the help screen.
@@ -98,6 +100,7 @@ impl App {
             follow: true,
             top: 0,
             page: 20,
+            columns: 80,
             confirm: None,
             notice: None,
             behind_help: Screen::Jobs,
@@ -118,8 +121,32 @@ impl App {
     /// Takes a newer picture of the machine, keeping the selection on the same
     /// job and run when they are still there.
     pub fn refresh(&mut self, snapshot: Snapshot) {
+        // The help screen sits on top of another one, which goes stale just
+        // the same: settle that one, then put the help back.
+        let helping = self.screen == Screen::Help;
+        if helping {
+            self.screen = self.behind_help;
+        }
+        self.settle(snapshot);
+        if helping {
+            self.behind_help = self.screen;
+            self.screen = Screen::Help;
+        }
+    }
+
+    fn settle(&mut self, snapshot: Snapshot) {
         let was_at = self.job_index();
         self.snapshot = snapshot;
+        // A question about a run that is over, or about a job that is gone,
+        // has nothing left to answer.
+        if let Some(Confirm::Stop { job, pid }) = &self.confirm {
+            let still_running = self.snapshot.jobs.iter().any(|view| {
+                view.name == *job && view.running().is_some_and(|run| run.pid == Some(*pid))
+            });
+            if !still_running {
+                self.confirm = None;
+            }
+        }
         let jobs = &self.snapshot.jobs;
         if self.selected().is_none() {
             let gone = self.job.take();
@@ -131,7 +158,6 @@ impl App {
             if let (Screen::Job | Screen::Log, Some(gone)) = (self.screen, gone) {
                 self.leave_log();
                 self.screen = Screen::Jobs;
-                self.confirm = None;
                 self.say(format!("{gone} is no longer in the jobs file"));
             }
         }
@@ -154,7 +180,7 @@ impl App {
                 Action::Yes => {
                     self.confirm = None;
                     match confirm {
-                        Confirm::Stop { pid, .. } => vec![Effect::Stop { pid }],
+                        Confirm::Stop { job, pid } => vec![Effect::Stop { job, pid }],
                     }
                 }
                 Action::No => {
@@ -236,10 +262,31 @@ impl App {
         }
     }
 
+    /// The log as the rows the screen shows: a line longer than the screen
+    /// is wide goes on in the next row.
+    pub fn log_rows(&self) -> Vec<&str> {
+        let Some(log) = &self.log else {
+            return Vec::new();
+        };
+        let columns = self.columns.max(1);
+        let mut rows = Vec::new();
+        for line in log.text.lines() {
+            let (mut start, mut taken) = (0, 0);
+            for (index, _) in line.char_indices() {
+                if taken == columns {
+                    rows.push(&line[start..index]);
+                    (start, taken) = (index, 0);
+                }
+                taken += 1;
+            }
+            rows.push(&line[start..]);
+        }
+        rows
+    }
+
     /// The highest first line that still fills the page.
     fn last_top(&self) -> usize {
-        let lines = self.log.as_ref().map_or(0, |log| log.text.lines().count());
-        lines.saturating_sub(self.page)
+        self.log_rows().len().saturating_sub(self.page)
     }
 
     fn page_step(&self) -> isize {
@@ -332,8 +379,12 @@ impl App {
         }
     }
 
-    /// The actions that act on the selected job.
+    /// The actions that act on the selected job. They work on the two
+    /// screens whose shortcut bar offers them, and nowhere else.
     fn operate(&mut self, action: Action) -> Vec<Effect> {
+        if !matches!(self.screen, Screen::Jobs | Screen::Job) {
+            return Vec::new();
+        }
         let Some(job) = self.selected() else {
             return Vec::new();
         };
@@ -361,6 +412,11 @@ impl App {
                 });
             }
             Action::Skip => {
+                if state.paused {
+                    self.say(format!(
+                        "{name} is paused: the skip counts once it is resumed"
+                    ));
+                }
                 return set(State {
                     skip_next: true,
                     ..state
@@ -632,12 +688,104 @@ mod tests {
                 pid: 77
             })
         );
-        assert_eq!(app.act(Action::Yes), [Effect::Stop { pid: 77 }]);
+        assert_eq!(
+            app.act(Action::Yes),
+            [Effect::Stop {
+                job: "alpha".to_owned(),
+                pid: 77
+            }]
+        );
         assert_eq!(app.confirm, None);
 
         app.act(Action::Stop);
         assert_eq!(app.act(Action::No), []);
         assert_eq!(app.confirm, None);
+    }
+
+    #[test]
+    fn a_confirmation_is_dropped_when_its_run_is_over() {
+        let mut app = App::new(alpha_with(vec![run("r1", Outcome::Running)]));
+        app.act(Action::Stop);
+        assert!(app.confirm.is_some());
+        app.refresh(alpha_with(vec![run("r1", Outcome::Ok)]));
+        assert_eq!(app.confirm, None);
+        assert_eq!(app.act(Action::Yes), []);
+    }
+
+    #[test]
+    fn a_confirmation_is_dropped_when_its_job_vanishes() {
+        let mut jobs = three();
+        jobs.jobs[0].runs = vec![run("r1", Outcome::Running)];
+        let mut app = App::new(jobs);
+        app.act(Action::Stop);
+        app.refresh(snapshot(vec![job("beta"), job("gamma")]));
+        assert_eq!(app.confirm, None);
+        assert_eq!(app.act(Action::Yes), []);
+    }
+
+    #[test]
+    fn help_does_not_keep_the_log_of_a_job_that_vanished() {
+        let mut jobs = three();
+        jobs.jobs[1].runs = vec![run("r1", Outcome::Ok)];
+        let mut app = App::new(jobs);
+        app.act(Action::Down);
+        app.act(Action::Open);
+        app.act(Action::Open);
+        app.show_log(Ok(log("beta output\n")));
+        app.act(Action::Help);
+
+        app.refresh(snapshot(vec![job("alpha"), job("gamma")]));
+        app.act(Action::Back);
+
+        assert_eq!(app.screen, Screen::Jobs);
+        assert_eq!(app.log, None);
+        assert_eq!(app.job.as_deref(), Some("gamma"));
+    }
+
+    #[test]
+    fn a_job_is_operated_only_from_the_screens_that_offer_it() {
+        let mut app = App::new(alpha_with(vec![run("r1", Outcome::Ok)]));
+        app.act(Action::Open);
+        app.act(Action::Open);
+        assert_eq!(app.screen, Screen::Log);
+        for action in [
+            Action::RunNow,
+            Action::Stop,
+            Action::Pause,
+            Action::Skip,
+            Action::Resume,
+            Action::EditPrompt,
+        ] {
+            assert_eq!(app.act(action), [], "{action:?} on the log");
+        }
+        app.act(Action::Help);
+        assert_eq!(app.act(Action::RunNow), []);
+    }
+
+    #[test]
+    fn a_skip_on_a_paused_job_says_when_it_counts() {
+        let mut jobs = three();
+        jobs.jobs[0].state = State {
+            paused: true,
+            skip_next: false,
+        };
+        let mut app = App::new(jobs);
+        assert_eq!(app.act(Action::Skip).len(), 1);
+        assert_eq!(
+            text(&app),
+            "alpha is paused: the skip counts once it is resumed"
+        );
+    }
+
+    #[test]
+    fn a_long_line_of_the_log_takes_several_rows() {
+        let mut app = on_the_log(Outcome::Ok);
+        app.columns = 10;
+        app.page = 2;
+        app.show_log(Ok(log("0123456789abcdef\n\nação\n")));
+        assert_eq!(app.log_rows(), ["0123456789", "abcdef", "", "ação"]);
+        // Four rows, two to a page: following starts at the third.
+        assert_eq!(app.first_line(), 2);
     }
 
     #[test]

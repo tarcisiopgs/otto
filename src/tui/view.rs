@@ -22,10 +22,23 @@ const STRIP: usize = 8;
 /// The rows a job takes on the list: two lines and the rule that closes it.
 const ENTRY: usize = 3;
 
+/// The rows of the job screen above its runs: the entry, three facts, a rule.
+const SHEET: usize = 6;
+
+/// The columns kept for how the last run ended, so that the strips of every
+/// job end in the same column.
+const LAST: usize = 28;
+
 /// The rows left for what scrolls on a terminal `height` rows tall: all but
 /// the header, the line under it, the notice and the shortcut bar.
 pub fn page(height: u16) -> usize {
     usize::from(height.saturating_sub(4))
+}
+
+/// The columns a line of the log has on a terminal `width` columns wide: all
+/// but the margin rule before it and the column after it.
+pub fn columns(width: u16) -> usize {
+    usize::from(width.saturating_sub(4))
 }
 
 pub fn draw(frame: &mut Frame, app: &App, now: &Zoned) {
@@ -45,18 +58,16 @@ pub fn draw(frame: &mut Frame, app: &App, now: &Zoned) {
     };
     body.resize(rows, Line::default());
 
-    let mut lines = vec![header(app, now, width)];
-    lines.push(match app.screen {
-        Screen::Log => Line::styled("─".repeat(width), dim()),
-        _ => Line::default(),
-    });
+    let mut lines = vec![header(app, now, width, rows), Line::default()];
     lines.extend(body);
-    lines.push(notice(app));
+    lines.push(notice(app, width));
     lines.push(bar(app, width));
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// The one accent: what is selected, what is running, what waits on the user.
+/// The one accent, kept to the two glyphs that mean "here" and "now": the
+/// selection marker and the mark of a run in progress. Words stay in the
+/// terminal's own foreground, which a light theme can read.
 fn accent() -> Style {
     Style::new().fg(Color::Yellow)
 }
@@ -79,24 +90,33 @@ fn width_of(spans: &[Span]) -> usize {
     spans.iter().map(Span::width).sum()
 }
 
-/// `left` at the left edge and `right` at the right one, a column in from each.
+fn spaces(count: usize) -> Span<'static> {
+    Span::raw(" ".repeat(count))
+}
+
+/// `left` at the left edge and `right` at the right one, a column in from it.
 fn between<'a>(left: Vec<Span<'a>>, right: Vec<Span<'a>>, width: usize) -> Line<'a> {
     let gap = width
         .saturating_sub(width_of(&left) + width_of(&right) + 1)
         .max(1);
     let mut spans = left;
-    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(spaces(gap));
     spans.extend(right);
     Line::from(spans)
 }
 
-/// `text` in exactly `columns` columns: padded, or cut with an ellipsis.
-fn fit(text: &str, columns: usize) -> String {
+/// `text` in at most `columns` columns, cut with an ellipsis when longer.
+fn cut(text: &str, columns: usize) -> String {
     if text.chars().count() <= columns {
-        return format!("{text:<columns$}");
+        return text.to_owned();
     }
     let kept: String = text.chars().take(columns.saturating_sub(1)).collect();
     format!("{kept}…")
+}
+
+/// `text` in exactly `columns` columns: padded, or cut with an ellipsis.
+fn fit(text: &str, columns: usize) -> String {
+    format!("{:<columns$}", cut(text, columns))
 }
 
 /// The end of `text` when it is longer than `columns`: a path says the most
@@ -110,24 +130,71 @@ fn tail(text: &str, columns: usize) -> String {
     format!("…{kept}")
 }
 
-/// `text` over as many lines of `columns` as it needs.
+/// `text` over lines of at most `columns`, broken between words. A word
+/// longer than a line is the only thing cut in two.
 fn wrapped(text: &str, columns: usize) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    chars
-        .chunks(columns.max(1))
-        .map(|chunk| chunk.iter().collect())
-        .collect()
+    let columns = columns.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        loop {
+            let room = match lines.last() {
+                Some(line) if line.is_empty() => columns,
+                Some(line) => columns.saturating_sub(line.chars().count() + 1),
+                None => 0,
+            };
+            if word.len() <= room {
+                if let Some(line) = lines.last_mut() {
+                    if !line.is_empty() {
+                        line.push(' ');
+                    }
+                    line.extend(word);
+                }
+                break;
+            }
+            // The word starts a line of its own, and fills it when it is
+            // longer than one.
+            if lines.last().is_none_or(|line| !line.is_empty()) {
+                lines.push(String::new());
+                continue;
+            }
+            let rest = word.split_off(columns);
+            if let Some(line) = lines.last_mut() {
+                line.extend(word);
+            }
+            lines.push(String::new());
+            word = rest;
+        }
+    }
+    lines
 }
 
-fn header<'a>(app: &'a App, now: &Zoned, width: usize) -> Line<'a> {
-    let job = app.job.as_deref().unwrap_or_default();
+fn header<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Line<'a> {
+    let job = app.selected();
+    let name = app.job.as_deref().unwrap_or_default();
     let run = app.selected_run();
+    // Where the selection is in a list that does not fit: `3 of 12`.
+    let folio = |chosen: Option<usize>, len: usize, visible: usize| match chosen {
+        Some(index) if len > visible => format!(" · {} of {len}", index + 1),
+        _ => String::new(),
+    };
     let place = match app.screen {
-        Screen::Jobs => "jobs".to_owned(),
-        Screen::Job => job.to_owned(),
+        Screen::Jobs => {
+            let all = &app.snapshot.jobs;
+            let chosen = all.iter().position(|job| job.name == name);
+            format!("jobs{}", folio(chosen, all.len(), rows / ENTRY))
+        }
+        Screen::Job => {
+            let runs = job.map_or(&[][..], |job| job.runs.as_slice());
+            let chosen = runs
+                .iter()
+                .position(|one| Some(&one.id) == app.run.as_ref());
+            let visible = rows.saturating_sub(SHEET);
+            format!("{name}{}", folio(chosen, runs.len(), visible))
+        }
         Screen::Log => match run {
-            Some(run) => format!("{job} · {}", started(run, now)),
-            None => job.to_owned(),
+            Some(run) => format!("{name} · {}", started(run, now)),
+            None => name.to_owned(),
         },
         Screen::Help => "help".to_owned(),
     };
@@ -138,7 +205,7 @@ fn header<'a>(app: &'a App, now: &Zoned, width: usize) -> Line<'a> {
     ];
     let right = match (app.screen, run) {
         (Screen::Log, Some(run)) => {
-            let mut spans = vec![mark(run), Span::raw(" "), Span::raw(run.outcome_label())];
+            let mut spans = vec![mark(run), Span::raw(" "), outcome(run)];
             if let Some(duration) = run.duration_label() {
                 spans.push(Span::styled(format!(" · {duration}"), dim()));
             }
@@ -159,10 +226,21 @@ fn mark(run: &Run) -> Span<'static> {
         Outcome::Running => Span::styled("●", accent()),
         Outcome::Ok => Span::raw("✓"),
         Outcome::Failed => Span::styled("✗", bad()),
+        // The record was left open: the machine went down, or the run was
+        // stopped. otto cannot tell which, and neither finished.
         Outcome::Interrupted => Span::styled("!", bad()),
         // A scheduled run that did not start the agent.
         Outcome::Skipped | Outcome::Paused => Span::styled("·", dim()),
     }
+}
+
+/// How a run ended, in words.
+fn outcome(run: &Run) -> Span<'static> {
+    let style = match run.outcome {
+        Outcome::Failed | Outcome::Interrupted => bad(),
+        _ => Style::new(),
+    };
+    Span::styled(run.outcome_label(), style)
 }
 
 /// When a run started, on the clock of the terminal.
@@ -198,10 +276,10 @@ fn schedule(schedule: &Schedule) -> String {
     format!("{} {days}", schedule.at)
 }
 
-/// The coming runs in words. `lead` goes before the time of a plain next run.
-fn coming(next: Option<&Next>, now: &Zoned, lead: &str) -> String {
+/// The coming runs in words.
+fn coming(next: Option<&Next>, now: &Zoned) -> String {
     match next {
-        Some(Next::At(when)) => format!("{lead}{}", next::label(when, now)),
+        Some(Next::At(when)) => format!("next {}", next::label(when, now)),
         Some(Next::Skipping { skipped, then }) => format!(
             "skips {}, then {}",
             next::label(skipped, now),
@@ -211,45 +289,45 @@ fn coming(next: Option<&Next>, now: &Zoned, lead: &str) -> String {
     }
 }
 
-fn state(job: &JobView) -> Span<'static> {
+fn state(job: &JobView) -> Vec<Span<'static>> {
     match job.status() {
-        "running" => Span::styled("● running", accent()),
-        "skip next" => Span::styled("skip next", accent()),
-        "paused" => Span::styled("paused", strong()),
-        other => Span::styled(other, dim()),
+        "running" => vec![Span::styled("●", accent()), Span::raw(" running")],
+        "paused" => vec![Span::styled("paused", strong())],
+        "skip next" => vec![Span::raw("skip next")],
+        other => vec![Span::styled(other, dim())],
     }
 }
 
-/// How the latest run ended, `last ok · 2m 14s`, or since when it is running.
-fn last(job: &JobView, now: &Zoned) -> Vec<Span<'static>> {
-    let Some(run) = job.runs.first() else {
-        return vec![Span::styled("never ran", dim())];
+/// How the last finished run ended, from the most said to the least:
+/// `last ok · 2m 14s`, `last ok`, `ok`. A narrow line takes a shorter one.
+fn last(job: &JobView, now: &Zoned) -> Vec<Vec<Span<'static>>> {
+    let finished = job.runs.iter().find(|run| run.outcome != Outcome::Running);
+    let Some(run) = finished else {
+        // Nothing has finished yet: the first run is going, or none ever ran.
+        return vec![match job.running() {
+            Some(run) => {
+                let since = run
+                    .started
+                    .to_zoned(now.time_zone().clone())
+                    .strftime("%H:%M");
+                vec![Span::raw(format!("running since {since}"))]
+            }
+            None => vec![Span::styled("never ran", dim())],
+        }];
     };
-    if run.outcome == Outcome::Running {
-        let since = run
-            .started
-            .to_zoned(now.time_zone().clone())
-            .strftime("%H:%M");
-        return vec![Span::styled(format!("running since {since}"), accent())];
-    }
-    let style = match run.outcome {
-        Outcome::Failed | Outcome::Interrupted => bad(),
-        _ => Style::new(),
-    };
-    let mut spans = vec![
-        Span::styled("last ", dim()),
-        Span::styled(run.outcome_label(), style),
-    ];
+    let short = vec![Span::styled("last ", dim()), outcome(run)];
+    let mut full = short.clone();
     if let Some(duration) = run.duration_label() {
-        spans.push(Span::styled(format!(" · {duration}"), dim()));
+        full.push(Span::styled(format!(" · {duration}"), dim()));
     }
-    spans
+    vec![full, short, vec![outcome(run)]]
 }
 
-/// The latest runs as marks, oldest first, so the newest sits at the right.
-fn strip(job: &JobView) -> Vec<Span<'static>> {
+/// The latest `count` runs as marks, oldest first, so the newest sits at the
+/// right.
+fn strip(job: &JobView, count: usize) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    for run in job.runs.iter().take(STRIP).rev() {
+    for run in job.runs.iter().take(count).rev() {
         if !spans.is_empty() {
             spans.push(Span::raw(" "));
         }
@@ -258,7 +336,77 @@ fn strip(job: &JobView) -> Vec<Span<'static>> {
     spans
 }
 
-/// The first of `len` rows to draw so that row `selected` is among `visible`.
+/// The second line of an entry: the coming run, the strip of marks and how
+/// the last run ended.
+///
+/// With room, the strip ends in a fixed column, so the newest run of every
+/// job is read down one column. Without it the line gives up, in this order,
+/// the alignment, the duration, the word `last` and the oldest marks.
+fn second_line(job: &JobView, now: &Zoned, width: usize) -> Line<'static> {
+    let lead = vec![
+        Span::styled(" │ ", dim()),
+        Span::raw(coming(job.next.as_ref(), now)),
+    ];
+    let edge = width.saturating_sub(1);
+    let endings = last(job, now);
+    let marks = strip(job, STRIP);
+    let build = |marks: Vec<Span<'static>>, gap: usize, ending: &[Span<'static>]| {
+        let mut left = lead.clone();
+        if !marks.is_empty() {
+            left.push(spaces(gap));
+            left.extend(marks);
+        }
+        between(left, ending.to_vec(), width)
+    };
+
+    let column = edge.saturating_sub(LAST + 2);
+    let taken = width_of(&lead) + width_of(&marks);
+    if let Some(full) = endings.first().filter(|full| width_of(full) <= LAST)
+        && taken + 2 <= column
+    {
+        return build(marks, column - taken, full);
+    }
+    let fits = |marks: &[Span], ending: &[Span]| {
+        let strip = if marks.is_empty() {
+            0
+        } else {
+            2 + width_of(marks)
+        };
+        width_of(&lead) + strip + 2 + width_of(ending) <= edge
+    };
+    for ending in &endings {
+        if fits(&marks, ending) {
+            return build(marks, 2, ending);
+        }
+    }
+    let shortest = endings.last().map_or(&[][..], Vec::as_slice);
+    for count in (0..STRIP).rev() {
+        let fewer = strip(job, count);
+        if fits(&fewer, shortest) {
+            return build(fewer, 2, shortest);
+        }
+    }
+    build(Vec::new(), 2, shortest)
+}
+
+/// The first line of an entry: the job, its agent, its schedule and its state.
+fn first_line<'a>(job: &'a JobView, chosen: bool, marker: bool, width: usize) -> Line<'a> {
+    between(
+        vec![
+            Span::styled(if chosen && marker { "▸ " } else { "  " }, accent()),
+            Span::styled(
+                fit(&job.name, 20),
+                if chosen { strong() } else { Style::new() },
+            ),
+            Span::raw(format!("  {:<8}", job.job.agent.program())),
+            Span::raw(schedule(&job.job.schedule)),
+        ],
+        state(job),
+        width,
+    )
+}
+
+/// The first of the rows to draw so that row `selected` is among `visible`.
 fn first_visible(selected: usize, visible: usize) -> usize {
     (selected + 1).saturating_sub(visible.max(1))
 }
@@ -267,17 +415,51 @@ fn rule(width: usize) -> Line<'static> {
     Line::styled(format!(" ├{}", "─".repeat(width.saturating_sub(3))), dim())
 }
 
+/// Why the jobs file cannot be used, in at most two lines, and what the list
+/// under it is.
 fn problem(app: &App, width: usize) -> Vec<Line<'_>> {
     let Some(error) = &app.snapshot.error else {
         return Vec::new();
     };
-    // A parser reports over several lines, with a drawing of the place.
-    let sentence = error.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut lines: Vec<Line> = wrapped(&sentence, width.saturating_sub(2))
+    // A parser reports over several lines, with a drawing of the place:
+    // `wrapped` makes one sentence of it.
+    // The file is the one otto was opened with: its name is enough, and its
+    // directory would take the line the reason needs.
+    let path = app.snapshot.config.display().to_string();
+    let name = app
+        .snapshot
+        .config
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let error = match name {
+        Some(name) if !path.is_empty() => error.replace(&path, &name),
+        _ => error.clone(),
+    };
+    let room = width.saturating_sub(4);
+    let mut parts = wrapped(&error, room);
+    if parts.len() > 2 {
+        parts.truncate(2);
+        if let Some(end) = parts.last_mut() {
+            *end = format!(
+                "{}…",
+                cut(end, room.saturating_sub(1)).trim_end_matches('…')
+            );
+        }
+    }
+    let mut lines: Vec<Line> = parts
         .into_iter()
-        .take(3)
-        .map(|part| Line::styled(format!(" {part}"), bad()))
+        .enumerate()
+        .map(|(index, part)| {
+            let lead = if index == 0 { " ! " } else { "   " };
+            Line::styled(format!("{lead}{part}"), bad())
+        })
         .collect();
+    if !app.snapshot.jobs.is_empty() {
+        lines.push(Line::styled(
+            "   showing the last valid read; fix the file to reload",
+            dim(),
+        ));
+    }
     lines.push(Line::default());
     lines
 }
@@ -301,33 +483,8 @@ fn jobs<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a
     let visible = rows.saturating_sub(lines.len()) / ENTRY;
     let first = first_visible(selected.unwrap_or(0), visible);
     for (index, job) in all.iter().enumerate().skip(first).take(visible.max(1)) {
-        let chosen = selected == Some(index);
-        lines.push(between(
-            vec![
-                Span::styled(if chosen { "▸ " } else { "  " }, accent()),
-                Span::styled(
-                    fit(&job.name, 20),
-                    if chosen { strong() } else { Style::new() },
-                ),
-                Span::raw(format!("  {:<8}", job.job.agent.program())),
-                Span::styled(schedule(&job.job.schedule), dim()),
-            ],
-            vec![state(job)],
-            width,
-        ));
-
-        let mut left = vec![
-            Span::styled(" │ ", dim()),
-            Span::raw(format!("{:<22}", coming(job.next.as_ref(), now, "next "))),
-        ];
-        let right = last(job, now);
-        let marks = strip(job);
-        // On a narrow terminal the strip gives way to how the last run ended.
-        if width_of(&left) + 2 + width_of(&marks) + 2 + width_of(&right) < width {
-            left.push(Span::raw("  "));
-            left.extend(marks);
-        }
-        lines.push(between(left, right, width));
+        lines.push(first_line(job, selected == Some(index), true, width));
+        lines.push(second_line(job, now, width));
         lines.push(rule(width));
     }
     lines
@@ -337,8 +494,13 @@ fn job<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a>
     let Some(job) = app.selected() else {
         return Vec::new();
     };
+    // A fact sits behind the margin rule and stops a column short of the edge.
+    let room = width.saturating_sub(13);
     let fact = |name: &'static str, value: String| {
-        vec![Span::styled(format!(" {name:<9}"), dim()), Span::raw(value)]
+        Line::from(vec![
+            Span::styled(format!(" │ {name:<9}"), dim()),
+            Span::raw(value),
+        ])
     };
     let args = if job.job.args.is_empty() {
         "none".to_owned()
@@ -346,24 +508,18 @@ fn job<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a>
         job.job.args.join(" ")
     };
     let mut lines = problem(app, width);
-    lines.push(between(
-        fact("agent", job.job.agent.program().to_owned()),
-        vec![state(job)],
-        width,
-    ));
-    lines.push(Line::from(fact("at", schedule(&job.job.schedule))));
-    lines.push(Line::from(fact("next", coming(job.next.as_ref(), now, ""))));
-    // A fact starts in column ten and stops a column short of the edge.
-    let room = width.saturating_sub(11);
-    lines.push(Line::from(fact(
+    // The same entry the list shows, opened: its facts and its runs follow.
+    lines.push(first_line(job, true, false, width));
+    lines.push(second_line(job, now, width));
+    lines.push(fact(
         "workdir",
         tail(&job.job.workdir.display().to_string(), room),
-    )));
-    lines.push(Line::from(fact(
+    ));
+    lines.push(fact(
         "prompt",
         tail(&job.job.prompt.display().to_string(), room),
-    )));
-    lines.push(Line::from(fact("args", args)));
+    ));
+    lines.push(fact("args", cut(&args, room)));
     lines.push(rule(width));
 
     if job.runs.is_empty() {
@@ -378,76 +534,135 @@ fn job<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a>
     let first = first_visible(selected.unwrap_or(0), visible);
     for (index, run) in job.runs.iter().enumerate().skip(first).take(visible.max(1)) {
         let chosen = selected == Some(index);
-        let outcome = match run.outcome {
-            Outcome::Failed | Outcome::Interrupted => bad(),
-            Outcome::Running => accent(),
-            _ => Style::new(),
-        };
         lines.push(Line::from(vec![
             Span::styled(if chosen { "▸ " } else { "  " }, accent()),
             mark(run),
             Span::raw(format!("  {}  ", started(run, now))),
             Span::styled(format!("{:<11}", run.trigger.label()), dim()),
-            Span::styled(format!("{:<14}", run.outcome_label()), outcome),
+            {
+                let mut how = outcome(run);
+                how.content = format!("{:<14}", how.content).into();
+                how
+            },
             Span::styled(run.duration_label().unwrap_or_default(), dim()),
         ]));
     }
     lines
 }
 
+/// The output of a run, behind the margin rule like the rest of its entry.
 fn log(app: &App, rows: usize) -> Vec<Line<'_>> {
-    let Some(log) = &app.log else {
-        return vec![Line::styled(" reading the output…", dim())];
+    let behind = |text: &str, style: Style| {
+        Line::from(vec![
+            Span::styled(" │ ", dim()),
+            Span::styled(text.to_owned(), style),
+        ])
     };
-    log.text
-        .lines()
+    if app.log.is_none() {
+        return vec![behind("reading the output…", dim())];
+    }
+    app.log_rows()
+        .into_iter()
         .skip(app.first_line())
         .take(rows)
-        .map(|line| Line::raw(format!(" {line}")))
+        .map(|row| behind(row, Style::new()))
         .collect()
 }
 
-/// Every key and what it does, in the order of the shortcut bars.
-const HELP: [(&str, &str); 14] = [
-    ("enter", "open the job, then the output of a run"),
+/// What the job keys do. One screen of the smallest terminal holds these and
+/// the column beside them.
+const ACTIONS: [(&str, &str); 8] = [
+    ("enter", "open the job, then a run"),
     ("esc", "go back"),
     ("r", "run the job now"),
     ("x", "stop the run in progress"),
     ("p", "pause the schedule"),
     ("s", "skip the next scheduled run"),
     ("u", "resume the schedule"),
-    ("e", "edit the prompt in $VISUAL or $EDITOR"),
-    ("↑ ↓  k j", "move"),
-    ("pgup pgdn", "move a page"),
-    ("g G", "go to the first, the last"),
-    ("?", "this help"),
-    ("q", "quit"),
-    ("ctrl-c", "quit"),
+    ("e", "edit the prompt"),
 ];
 
+const MOVES: [(&str, &str); 5] = [
+    ("↑ ↓ k j", "move"),
+    ("pgup pgdn", "move a page"),
+    ("g G", "first, last"),
+    ("?", "this help"),
+    ("q", "quit"),
+];
+
+/// The keys in two columns, with what each mark of a run means under the
+/// second.
 fn help() -> Vec<Line<'static>> {
-    HELP.iter()
+    let ran = |outcome| Run {
+        id: String::new(),
+        started: jiff::Timestamp::UNIX_EPOCH,
+        finished: None,
+        trigger: crate::store::Trigger::Manual,
+        outcome,
+        exit_code: None,
+        pid: None,
+    };
+    let legend = |outcome, meaning: &'static str| {
+        vec![mark(&ran(outcome)), Span::raw(format!(" {meaning}"))]
+    };
+    let mut right: Vec<Vec<Span>> = MOVES
+        .iter()
         .map(|(key, what)| {
-            Line::from(vec![
-                Span::styled(format!(" {key:<11}"), strong()),
+            vec![
+                Span::styled(format!("{key:<10}"), strong()),
                 Span::raw(*what),
-            ])
+            ]
+        })
+        .collect();
+    let mut both = legend(Outcome::Ok, "ok   ");
+    both.extend(legend(Outcome::Failed, "failed"));
+    right.push(both);
+    let mut both = legend(Outcome::Interrupted, "interrupted   ");
+    both.extend(legend(Outcome::Running, "running"));
+    right.push(both);
+    right.push(legend(Outcome::Skipped, "did not start the agent"));
+
+    ACTIONS
+        .iter()
+        .zip(right)
+        .map(|((key, what), right)| {
+            let mut spans = vec![
+                Span::styled(format!(" {key:<6}"), strong()),
+                Span::raw(format!("{what:<28}")),
+            ];
+            spans.extend(right);
+            Line::from(spans)
         })
         .collect()
 }
 
-fn notice(app: &App) -> Line<'_> {
+fn notice(app: &App, width: usize) -> Line<'_> {
+    let room = width.saturating_sub(2);
     if let Some(notice) = &app.notice {
-        let style = if notice.error { bad() } else { accent() };
-        return Line::styled(format!(" {}", notice.text), style);
+        let style = if notice.error { bad() } else { Style::new() };
+        return Line::styled(format!(" {}", cut(&notice.text, room)), style);
     }
-    // With nothing to tell, the log screen says how much of the output it shows.
-    match (&app.screen, &app.log) {
-        (Screen::Log, Some(log)) if log.truncated => {
-            Line::styled(" showing the last 1 MiB of the output", dim())
-        }
-        _ => Line::default(),
+    // With nothing to tell, the log screen says where it is in the output.
+    let (Screen::Log, Some(log)) = (&app.screen, &app.log) else {
+        return Line::default();
+    };
+    let total = app.log_rows().len();
+    let first = app.first_line();
+    let mut text = if total == 0 {
+        "no output yet".to_owned()
+    } else {
+        format!("{}–{} of {total}", first + 1, (first + app.page).min(total))
+    };
+    let running = app
+        .selected_run()
+        .is_some_and(|run| run.outcome == Outcome::Running);
+    if running && app.follow {
+        text.push_str(" · following");
     }
+    if log.truncated {
+        text.push_str(" · showing the last 1 MiB of the output");
+    }
+    Line::styled(format!(" {}", cut(&text, room)), dim())
 }
 
 /// The keys of the screen, or the question the app is waiting on.
@@ -457,54 +672,51 @@ fn bar(app: &App, width: usize) -> Line<'_> {
             Confirm::Stop { job, .. } => format!(" stop {job}?"),
         };
         return Line::from(vec![
-            Span::styled(question, accent().add_modifier(Modifier::BOLD)),
+            Span::styled(question, strong()),
             Span::raw("  "),
             Span::styled("y", strong()),
-            Span::styled(" yes  ", dim()),
+            Span::styled(" stop  ", dim()),
             Span::styled("n", strong()),
-            Span::styled(" no", dim()),
+            Span::styled(" keep running", dim()),
         ]);
     }
-    let keys: &[(&str, &str)] = match app.screen {
-        Screen::Jobs => &[
-            ("enter", "open"),
-            ("r", "run"),
-            ("x", "stop"),
-            ("p", "pause"),
-            ("s", "skip"),
-            ("u", "resume"),
-            ("e", "prompt"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
-        Screen::Job => &[
-            ("enter", "log"),
-            ("r", "run"),
-            ("x", "stop"),
-            ("p", "pause"),
-            ("s", "skip"),
-            ("u", "resume"),
-            ("e", "prompt"),
-            ("esc", "back"),
-        ],
-        Screen::Log => &[
-            ("↑↓", "scroll"),
-            ("g", "top"),
-            ("G", "end"),
-            ("esc", "back"),
-            ("?", "help"),
-        ],
-        Screen::Help => &[("esc", "back"), ("q", "quit")],
+    // The second list always shows: the way back, to the help and out. The
+    // actions give way to it on a narrow terminal, last first.
+    type Keys = &'static [(&'static str, &'static str)];
+    const JOB: Keys = &[
+        ("r", "run"),
+        ("x", "stop"),
+        ("p", "pause"),
+        ("s", "skip"),
+        ("u", "resume"),
+        ("e", "prompt"),
+    ];
+    let (open, actions, always): (Keys, Keys, Keys) = match app.screen {
+        Screen::Jobs => (&[("enter", "open")], JOB, &[("?", "help"), ("q", "quit")]),
+        Screen::Job => (&[("enter", "log")], JOB, &[("esc", "back"), ("?", "help")]),
+        Screen::Log => (
+            &[("↑↓", "scroll")],
+            &[("g", "top"), ("G", "end")],
+            &[("esc", "back"), ("?", "help")],
+        ),
+        Screen::Help => (&[], &[], &[("esc", "back"), ("q", "quit")]),
     };
-    let mut spans = vec![Span::raw(" ")];
-    let mut used = 1;
-    for (key, what) in keys {
-        // One that does not fit is left out whole; the help screen has it.
-        let needed = key.chars().count() + 1 + what.chars().count();
-        if used + needed > width {
+    let size = |(key, what): &(&str, &str)| key.chars().count() + 1 + what.chars().count() + 2;
+    let mut room = width
+        .saturating_sub(1)
+        .saturating_sub(always.iter().map(size).sum::<usize>())
+        // The last one needs no gap after it.
+        + 2;
+    let mut shown = Vec::new();
+    for item in open.iter().chain(actions) {
+        if size(item) > room {
             break;
         }
-        used += needed + 2;
+        room -= size(item);
+        shown.push(item);
+    }
+    let mut spans = vec![Span::raw(" ")];
+    for (key, what) in shown.into_iter().chain(always) {
         spans.push(Span::styled(*key, strong()));
         spans.push(Span::styled(format!(" {what}  "), dim()));
     }
@@ -679,8 +891,9 @@ mod tests {
         let text = screen(&app(vec![with_runs]), 80, 24);
         assert!(text.contains("! · ✗ ✓ ●"), "{text}");
         assert!(text.contains("● running"));
-        assert!(text.contains("running since 16:16"), "{text}");
-        assert!(!text.contains("last running"));
+        // What the last finished run did stays on screen while a new one goes.
+        assert!(text.contains("last ok · 2m 14s"), "{text}");
+        assert!(!text.contains("running since"));
     }
 
     #[test]
@@ -829,8 +1042,8 @@ mod tests {
         app.act(Action::Stop);
         let text = screen(&app, 80, 24);
         assert!(text.contains("stop report?"));
-        assert!(text.contains("y yes"));
-        assert!(text.contains("n no"));
+        assert!(text.contains("y stop"));
+        assert!(text.contains("n keep running"));
         assert!(!text.contains("q quit"));
     }
 
@@ -884,7 +1097,14 @@ mod tests {
     fn a_shortcut_that_does_not_fit_is_left_out_whole() {
         let text = screen(&app(vec![job("report")]), 76, 24);
         let bar = text.lines().last().unwrap().trim_end();
-        assert!(bar.ends_with("? help"), "{bar:?}");
+        // The way to the help and the way out stay; an action gives way.
+        assert!(bar.ends_with("? help  q quit"), "{bar:?}");
+        assert!(bar.contains("u resume"));
+        assert!(!bar.contains("prompt"));
+
+        let narrow = screen(&app(vec![job("report")]), MIN.0, 24);
+        let bar = narrow.lines().last().unwrap().trim_end();
+        assert!(bar.ends_with("? help  q quit"), "{bar:?}");
     }
 
     #[test]
@@ -912,6 +1132,231 @@ mod tests {
             text.contains("TOML parse error | 1 | jobs = 3 | ^ invalid type"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_job_that_only_ever_started_says_since_when_it_runs() {
+        let first_run = JobView {
+            runs: vec![run("r1", Outcome::Running, Trigger::Manual)],
+            ..job("report")
+        };
+        assert!(screen(&app(vec![first_run]), 80, 24).contains("running since 16:16"));
+    }
+
+    /// `report` with twelve runs, the newest of which failed.
+    fn busy() -> JobView {
+        let mut runs = vec![run("new", Outcome::Failed, Trigger::Manual)];
+        runs.extend((0..11).map(|n| run(&format!("r{n}"), Outcome::Ok, Trigger::Manual)));
+        JobView {
+            runs,
+            ..job("report")
+        }
+    }
+
+    #[test]
+    fn the_strip_ends_in_the_same_column_for_every_job() {
+        let short = JobView {
+            runs: vec![run("r1", Outcome::Ok, Trigger::Manual)],
+            ..job("triage")
+        };
+        let text = screen(&app(vec![busy(), short]), 80, 24);
+        let column = |needle: &str| {
+            let line = text.lines().find(|line| line.contains(needle)).unwrap();
+            line.chars().position(|c| c == 'l').unwrap()
+        };
+        let newest: Vec<usize> = text
+            .lines()
+            .filter(|line| line.contains(" │ next"))
+            .map(|line| {
+                let marks: Vec<usize> = line
+                    .chars()
+                    .enumerate()
+                    .filter(|(_, c)| matches!(c, '✓' | '✗'))
+                    .map(|(index, _)| index)
+                    .collect();
+                *marks.last().unwrap()
+            })
+            .collect();
+        assert_eq!(newest.len(), 2);
+        assert_eq!(newest[0], newest[1], "{text}");
+        let _ = column;
+    }
+
+    #[test]
+    fn the_narrowest_terminal_keeps_marks_and_the_outcome() {
+        let text = screen(&app(vec![busy()]), MIN.0, MIN.1);
+        let line = text.lines().find(|line| line.contains(" │ next")).unwrap();
+        assert!(line.contains("failed (3)"), "{text}");
+        assert!(line.contains('✗'), "{text}");
+        assert!(line.contains('✓'), "{text}");
+    }
+
+    #[test]
+    fn a_skip_keeps_the_strip_on_a_wide_terminal() {
+        let skipping = JobView {
+            next: Some(Next::Skipping {
+                skipped: local("2026-10-06T16:05"),
+                then: local("2026-10-07T16:05"),
+            }),
+            ..busy()
+        };
+        let text = screen(&app(vec![skipping]), 100, 24);
+        let line = text
+            .lines()
+            .find(|line| line.contains("skips today"))
+            .unwrap();
+        assert!(line.contains("✓ ✗"), "{text}");
+        assert!(line.contains("failed (3)"));
+    }
+
+    #[test]
+    fn a_weekday_reads_in_lowercase_like_everything_else() {
+        let later = JobView {
+            next: Some(Next::At(local("2026-10-12T16:05"))),
+            ..job("report")
+        };
+        assert!(screen(&app(vec![later]), 80, 24).contains("next mon 16:05"));
+    }
+
+    #[test]
+    fn the_job_screen_opens_with_the_entry_of_the_job() {
+        let text = screen(&on_the_job(), 80, 24);
+        let lines: Vec<&str> = text.lines().collect();
+        let entry = lines
+            .iter()
+            .position(|line| line.contains("  report") && line.contains("claude"))
+            .unwrap();
+        assert!(
+            lines[entry + 1].starts_with(" │ next today 16:05"),
+            "{text}"
+        );
+        assert!(lines[entry + 1].contains("last ok"));
+        assert!(lines[entry + 2].starts_with(" │ workdir"), "{text}");
+        assert!(lines[entry + 3].starts_with(" │ prompt"));
+        assert!(lines[entry + 4].starts_with(" │ args"));
+        assert!(lines[entry + 5].starts_with(" ├──"));
+    }
+
+    #[test]
+    fn the_output_of_a_run_sits_behind_the_margin_rule() {
+        let app = on_the_log(Log {
+            text: "first line\n".to_owned(),
+            truncated: false,
+        });
+        let text = screen(&app, 80, 24);
+        assert!(text.contains(" │ first line"), "{text}");
+        assert!(!text.contains("────"));
+    }
+
+    #[test]
+    fn a_line_of_output_wider_than_the_terminal_goes_on_below() {
+        let long = format!("{}THE-END\n", "x".repeat(152));
+        let mut app = on_the_log(Log {
+            text: long,
+            truncated: false,
+        });
+        app.columns = columns(80);
+        let text = screen(&app, 80, 24);
+        assert!(text.contains("THE-END"), "{text}");
+    }
+
+    #[test]
+    fn the_log_screen_says_where_it_is_in_the_output() {
+        let text: String = (0..100).map(|n| format!("line {n:03}\n")).collect();
+        let mut app = on_the_log(Log {
+            text,
+            truncated: true,
+        });
+        let end = screen(&app, 80, 24);
+        assert!(end.contains("81–100 of 100"), "{end}");
+        assert!(end.contains("showing the last 1 MiB"));
+        app.act(Action::Top);
+        assert!(screen(&app, 80, 24).contains("1–20 of 100"));
+    }
+
+    #[test]
+    fn the_help_fits_the_smallest_terminal_and_explains_the_marks() {
+        let mut app = app(vec![job("report")]);
+        app.act(Action::Help);
+        let text = screen(&app, MIN.0, MIN.1);
+        for expected in [
+            "run the job now",
+            "edit the prompt",
+            "move",
+            "this help",
+            "quit",
+            "✓ ok",
+            "✗ failed",
+            "! interrupted",
+            "● running",
+            "· did not start the agent",
+        ] {
+            assert!(text.contains(expected), "{expected:?} is missing:\n{text}");
+        }
+    }
+
+    #[test]
+    fn an_error_breaks_between_words_and_says_the_list_is_old() {
+        let mut app = app(vec![job("report")]);
+        let words: Vec<String> = (0..60).map(|n| format!("word{n:02}")).collect();
+        app.snapshot.error = Some(words.join(" "));
+        let text = screen(&app, 80, 24);
+        let first = text.lines().find(|line| line.contains("word00")).unwrap();
+        assert!(first.starts_with(" ! word00"), "{text}");
+        // No word is cut in two at the edge.
+        assert!(
+            first.trim_end().ends_with(|c: char| c.is_ascii_digit()),
+            "{first:?}"
+        );
+        assert!(text.contains('…'), "{text}");
+        assert!(!text.contains("word59"));
+        assert!(text.contains("last valid read"), "{text}");
+    }
+
+    #[test]
+    fn an_error_names_the_jobs_file_without_its_directory() {
+        let mut app = app(vec![job("report")]);
+        app.snapshot.error = Some(
+            "invalid config /home/me/.config/otto/jobs.toml: job report: schedule.at must be HH:MM"
+                .to_owned(),
+        );
+        let text = screen(&app, MIN.0, 24);
+        assert!(
+            text.contains(" ! invalid config jobs.toml: job report:"),
+            "{text}"
+        );
+        assert!(text.contains("be HH:MM"));
+    }
+
+    #[test]
+    fn the_two_columns_of_the_help_do_not_touch() {
+        let mut app = app(vec![job("report")]);
+        app.act(Action::Help);
+        let text = screen(&app, MIN.0, MIN.1);
+        assert!(text.contains("skip the next scheduled run ✓ ok"), "{text}");
+    }
+
+    #[test]
+    fn a_long_list_says_where_the_selection_is() {
+        let jobs = (0..20).map(|n| job(&format!("job-{n:02}"))).collect();
+        let mut app = app(jobs);
+        assert!(screen(&app, 80, 14).contains("jobs · 1 of 20"));
+        app.act(Action::Bottom);
+        assert!(screen(&app, 80, 14).contains("jobs · 20 of 20"));
+        // A list that fits says nothing of the kind.
+        assert!(!screen(&self::app(vec![job("report")]), 80, 24).contains(" of 1"));
+    }
+
+    #[test]
+    fn a_notice_too_long_for_the_line_ends_in_an_ellipsis() {
+        let mut app = app(vec![job("report")]);
+        app.notice = Some(Notice {
+            text: "x".repeat(200),
+            error: true,
+        });
+        let text = screen(&app, 80, 24);
+        let line = text.lines().find(|line| line.contains("xxx")).unwrap();
+        assert!(line.trim_end().ends_with('…'), "{line:?}");
     }
 
     #[test]

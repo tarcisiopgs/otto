@@ -59,17 +59,26 @@ fn detach(command: &mut Command) {
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
 
-/// Ends the process group `pid` leads: the run and everything it started. A
-/// process that leads no group is refused, since ending it alone would leave
-/// the agent running with nobody recording it.
+/// Ends the process group `pid` leads: the run of `job` and everything it
+/// started.
+///
+/// Two things are checked first. The process must be `otto … run <job>`: a
+/// record left open by a crash can name a process id that the system has since
+/// given to something else. And it must lead its group: ending it alone would
+/// leave the agent running with nobody recording it.
 #[cfg(not(windows))]
-pub fn stop_group(pid: u32, runner: &dyn Runner) -> Result<()> {
+pub fn stop_group(pid: u32, job: &str, runner: &dyn Runner) -> Result<()> {
     let pid = pid.to_string();
-    let group = runner.run("ps", &["-o", "pgid=", "-p", &pid])?;
-    if !group.success {
+    let found = runner.run("ps", &["-o", "pgid=,args=", "-p", &pid])?;
+    let mut words = found.stdout.split_whitespace();
+    let Some(group) = words.next().filter(|_| found.success) else {
         anyhow::bail!("process {pid} is not running");
+    };
+    let command: Vec<&str> = words.collect();
+    if !command.windows(2).any(|pair| pair == ["run", job]) {
+        anyhow::bail!("process {pid} is not a run of {job}");
     }
-    if group.stdout.trim() != pid {
+    if group != pid {
         anyhow::bail!("process {pid} does not lead its process group");
     }
     must(runner, "kill", &["-s", "TERM", "--", &format!("-{pid}")])
@@ -78,7 +87,7 @@ pub fn stop_group(pid: u32, runner: &dyn Runner) -> Result<()> {
 /// Windows has no signal to ask a windowless process to end: the tree is
 /// ended outright.
 #[cfg(windows)]
-pub fn stop_group(pid: u32, runner: &dyn Runner) -> Result<()> {
+pub fn stop_group(pid: u32, _job: &str, runner: &dyn Runner) -> Result<()> {
     must(runner, "taskkill", &["/T", "/F", "/PID", &pid.to_string()])
 }
 
@@ -95,29 +104,55 @@ mod tests {
 
     #[test]
     fn a_leader_gets_the_signal_as_a_group() {
-        let runner = Recorder::new().printing("ps -o pgid= -p 77", "   77\n");
-        stop_group(77, &runner).unwrap();
-        assert_eq!(runner.calls(), ["ps -o pgid= -p 77", "kill -s TERM -- -77"]);
+        let runner = Recorder::new().printing(
+            "ps -o pgid=,args= -p 77",
+            "   77 /usr/local/bin/otto --config /c/jobs.toml run report --scheduled\n",
+        );
+        stop_group(77, "report", &runner).unwrap();
+        assert_eq!(
+            runner.calls(),
+            ["ps -o pgid=,args= -p 77", "kill -s TERM -- -77"]
+        );
     }
 
     #[test]
     fn a_process_that_does_not_lead_its_group_is_refused() {
-        let runner = Recorder::new().printing("ps -o pgid= -p 77", " 4242\n");
-        let error = stop_group(77, &runner).unwrap_err();
+        let runner = Recorder::new().printing("ps -o pgid=,args= -p 77", " 4242 otto run report\n");
+        let error = stop_group(77, "report", &runner).unwrap_err();
         assert!(format!("{error:#}").contains("does not lead its process group"));
         assert!(!runner.calls().iter().any(|call| call.starts_with("kill")));
+    }
+
+    /// A record left open by a crash can name a process id that now belongs
+    /// to something else.
+    #[test]
+    fn a_process_that_is_not_that_run_is_refused() {
+        for line in [
+            "   77 /Applications/Safari.app/Contents/MacOS/Safari\n",
+            "   77 otto --config /c/jobs.toml run reports\n",
+            "   77 otto --config /c/jobs.toml list\n",
+        ] {
+            let runner = Recorder::new().printing("ps -o pgid=,args= -p 77", line);
+            let error = stop_group(77, "report", &runner).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("is not a run of report"),
+                "{line}"
+            );
+            assert!(!runner.calls().iter().any(|call| call.starts_with("kill")));
+        }
     }
 
     #[test]
     fn a_process_that_is_gone_is_reported() {
         let runner = Recorder::new().answering("ps", &[false]);
-        let error = stop_group(77, &runner).unwrap_err();
+        let error = stop_group(77, "report", &runner).unwrap_err();
         assert!(format!("{error:#}").contains("is not running"));
     }
 
     fn sh(script: &str, argument: &str) -> Command {
         let mut command = Command::new("sh");
-        command.args(["-c", script, argument]);
+        // The trailing words make it read as a run of `report` to `stop_group`.
+        command.args(["-c", script, argument, "run", "report"]);
         command
     }
 
@@ -143,10 +178,13 @@ mod tests {
     #[test]
     fn a_started_child_leads_its_own_group() {
         let mut children = Children::new();
-        let pid = children.start(sh("sleep 30", "")).unwrap().to_string();
+        let pid = children
+            .start(sh("sleep 30 & wait", ""))
+            .unwrap()
+            .to_string();
         let group = System.run("ps", &["-o", "pgid=", "-p", &pid]).unwrap();
         assert_eq!(group.stdout.trim(), pid);
-        stop_group(pid.parse().unwrap(), &System).unwrap();
+        stop_group(pid.parse().unwrap(), "report", &System).unwrap();
         assert!(eventually(&mut children, || !exists(&pid)));
     }
 
@@ -171,7 +209,7 @@ mod tests {
         let grandchild = read();
         assert!(exists(&grandchild));
 
-        stop_group(pid, &System).unwrap();
+        stop_group(pid, "report", &System).unwrap();
 
         let pid = pid.to_string();
         assert!(eventually(&mut children, || !exists(&pid)));

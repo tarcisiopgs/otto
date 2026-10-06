@@ -80,7 +80,7 @@ fn after(schedule: &Schedule, now: Timestamp, zone: &TimeZone) -> Result<Zoned> 
     bail!("the schedule has no day to run on")
 }
 
-/// `today 16:05`, `tomorrow 07:00`, `Mon 16:05` within the week, a date after that.
+/// `today 16:05`, `tomorrow 07:00`, `mon 16:05` within the week, a date after that.
 pub fn label(when: &Zoned, now: &Zoned) -> String {
     let (day, today) = (when.date(), now.date());
     let format = if day == today {
@@ -92,7 +92,7 @@ pub fn label(when: &Zoned, now: &Zoned) -> String {
     } else {
         "%Y-%m-%d %H:%M"
     };
-    when.strftime(format).to_string()
+    when.strftime(format).to_string().to_lowercase()
 }
 
 #[cfg(test)]
@@ -251,7 +251,7 @@ mod tests {
         let now = local("2026-10-06T09:00");
         assert_eq!(label(&local("2026-10-06T16:05"), &now), "today 16:05");
         assert_eq!(label(&local("2026-10-07T07:00"), &now), "tomorrow 07:00");
-        assert_eq!(label(&local("2026-10-12T16:05"), &now), "Mon 16:05");
+        assert_eq!(label(&local("2026-10-12T16:05"), &now), "mon 16:05");
         assert_eq!(label(&local("2026-10-20T16:05"), &now), "2026-10-20 16:05");
     }
 }

@@ -38,7 +38,9 @@ fn watch(
     let mut app = App::new(world.snapshot(now()));
     let mut next_tick = Instant::now() + TICK;
     loop {
-        app.page = view::page(terminal.size().context(cannot_draw)?.height);
+        let size = terminal.size().context(cannot_draw)?;
+        app.page = view::page(size.height);
+        app.columns = view::columns(size.width);
         let clock = now().to_zoned(zone.clone());
         terminal
             .draw(|frame| view::draw(frame, &app, &clock))
@@ -63,7 +65,9 @@ fn watch(
             match effect {
                 Effect::Quit => return Ok(()),
                 Effect::Edit { path } => {
-                    // The editor needs the terminal as the shell left it.
+                    // The editor needs the terminal as the shell left it,
+                    // cursor included: drawing hides it.
+                    terminal.show_cursor().context(cannot_draw)?;
                     ratatui::restore();
                     let edited = world.edit(&path);
                     *terminal = ratatui::try_init().context("cannot take over the terminal")?;
@@ -89,7 +93,7 @@ fn perform(effect: &Effect, world: &mut dyn World) -> Result<(), String> {
     let done = match effect {
         Effect::SetState { job, state } => world.set_state(job, *state),
         Effect::Start { job } => world.start(job),
-        Effect::Stop { pid } => world.stop(*pid),
+        Effect::Stop { job, pid } => world.stop(job, *pid),
         // These two belong to the loop, which owns the terminal.
         Effect::Edit { .. } | Effect::Quit => Ok(()),
     };
@@ -209,7 +213,10 @@ mod tests {
             Effect::Start {
                 job: "report".to_owned(),
             },
-            Effect::Stop { pid: 77 },
+            Effect::Stop {
+                job: "report".to_owned(),
+                pid: 77,
+            },
             Effect::SetState {
                 job: "report".to_owned(),
                 state,
@@ -219,7 +226,7 @@ mod tests {
         }
         assert_eq!(
             *world.calls.borrow(),
-            ["start report", "stop 77", "set_state report paused"]
+            ["start report", "stop report 77", "set_state report paused"]
         );
     }
 
@@ -228,7 +235,13 @@ mod tests {
         let mut world = world();
         world.fail = Some("process 77 does not lead its process group".to_owned());
         assert_eq!(
-            perform(&Effect::Stop { pid: 77 }, &mut world),
+            perform(
+                &Effect::Stop {
+                    job: "report".to_owned(),
+                    pid: 77
+                },
+                &mut world
+            ),
             Err("process 77 does not lead its process group".to_owned())
         );
     }
