@@ -1,16 +1,21 @@
 //! Fitting text to the columns of a terminal. A column is not a character: a
-//! CJK character takes two, and counting characters would push a line past
-//! its edge.
+//! CJK character takes two, an emoji with a variation selector is two
+//! characters in two columns, and a family joined with zero-width joiners is
+//! five characters in two. Text is walked in what reads as one character at a
+//! time, and each is measured the way the terminal library measures it, so
+//! nothing here disagrees with what is drawn.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// The columns `text` takes on a terminal.
 pub fn width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-fn columns_of(c: char) -> usize {
-    UnicodeWidthChar::width(c).unwrap_or(0)
+/// `text` as what reads as one character each, with where each starts.
+fn clusters(text: &str) -> impl DoubleEndedIterator<Item = (usize, &str)> {
+    text.grapheme_indices(true)
 }
 
 /// `text` in at most `columns` columns, cut with an ellipsis when longer.
@@ -21,17 +26,16 @@ pub fn cut(text: &str, columns: usize) -> String {
     let Some(room) = columns.checked_sub(1) else {
         return String::new();
     };
-    let mut kept = String::new();
+    let mut end = 0;
     let mut taken = 0;
-    for c in text.chars() {
-        if taken + columns_of(c) > room {
+    for (index, cluster) in clusters(text) {
+        if taken + width(cluster) > room {
             break;
         }
-        taken += columns_of(c);
-        kept.push(c);
+        taken += width(cluster);
+        end = index + cluster.len();
     }
-    kept.push('…');
-    kept
+    format!("{}…", &text[..end])
 }
 
 /// `text` in exactly `columns` columns: padded, or cut with an ellipsis.
@@ -49,16 +53,16 @@ pub fn tail(text: &str, columns: usize) -> String {
         return text.to_owned();
     }
     let room = columns.saturating_sub(1);
-    let mut kept = Vec::new();
+    let mut start = text.len();
     let mut taken = 0;
-    for c in text.chars().rev() {
-        if taken + columns_of(c) > room {
+    for (index, cluster) in clusters(text).rev() {
+        if taken + width(cluster) > room {
             break;
         }
-        taken += columns_of(c);
-        kept.push(c);
+        taken += width(cluster);
+        start = index;
     }
-    std::iter::once('…').chain(kept.into_iter().rev()).collect()
+    format!("…{}", &text[start..])
 }
 
 /// `text` over lines of at most `columns`, broken between words. A word wider
@@ -83,18 +87,18 @@ pub fn wrapped(text: &str, columns: usize) -> Vec<String> {
     lines
 }
 
-/// One line as the rows it takes at `columns` wide. A character is never
-/// split, and one wider than the row has a row to itself.
+/// One line as the rows it takes at `columns` wide. What reads as one
+/// character is never split, and one wider than the row has a row to itself.
 pub fn rows(line: &str, columns: usize) -> Vec<&str> {
     let columns = columns.max(1);
     let mut rows = Vec::new();
     let (mut start, mut taken) = (0, 0);
-    for (index, c) in line.char_indices() {
-        if taken > 0 && taken + columns_of(c) > columns {
+    for (index, cluster) in clusters(line) {
+        if taken > 0 && taken + width(cluster) > columns {
             rows.push(&line[start..index]);
             (start, taken) = (index, 0);
         }
-        taken += columns_of(c);
+        taken += width(cluster);
     }
     rows.push(&line[start..]);
     rows
@@ -146,6 +150,58 @@ mod tests {
     fn wrapped_cuts_only_a_word_longer_than_a_line() {
         assert_eq!(wrapped("abcdefgh", 3), ["abc", "def", "gh"]);
         assert_eq!(wrapped("ab cdefghi j", 4), ["ab", "cdef", "ghi", "j"]);
+    }
+
+    /// An emoji with a variation selector is two characters and two columns;
+    /// a family joined with zero-width joiners is five characters and two.
+    #[test]
+    fn what_reads_as_one_character_is_measured_and_kept_as_one() {
+        let heart = "❤\u{fe0f}";
+        let hearts = heart.repeat(3);
+        assert_eq!(width(&hearts), 6);
+        assert_eq!(cut(&hearts, 4), format!("{heart}…"));
+        assert_eq!(width(&fit(&hearts, 4)), 4);
+        assert_eq!(tail(&hearts, 5), format!("…{}", heart.repeat(2)));
+
+        let warnings = "⚠\u{fe0f}".repeat(10);
+        let broken = rows(&warnings, 10);
+        assert_eq!(broken.len(), 2);
+        assert!(broken.iter().all(|row| width(row) == 10), "{broken:?}");
+
+        let family = "👨\u{200d}👩\u{200d}👧";
+        let two = family.repeat(2);
+        assert_eq!(rows(&two, width(family)), [family, family]);
+        assert_eq!(
+            wrapped(&format!("{family} {family}"), width(family)).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn nothing_fitted_is_ever_wider_than_its_columns() {
+        let samples = [
+            "plain text here",
+            "日本語のテキスト",
+            "❤\u{fe0f}⚠\u{fe0f}👨\u{200d}👩\u{200d}👧 mixed 日本",
+            "e\u{301}e\u{301}e\u{301}e\u{301}",
+        ];
+        for text in samples {
+            for columns in 0..12 {
+                assert!(
+                    width(&cut(text, columns)) <= columns,
+                    "cut {text:?} {columns}"
+                );
+                assert!(
+                    width(&tail(text, columns)) <= columns.max(1),
+                    "tail {text:?} {columns}"
+                );
+                for row in rows(text, columns.max(2)) {
+                    assert!(width(row) <= columns.max(2), "rows {text:?} {columns}");
+                }
+                let joined: String = rows(text, columns).concat();
+                assert_eq!(joined, text, "rows lost text at {columns}");
+            }
+        }
     }
 
     #[test]

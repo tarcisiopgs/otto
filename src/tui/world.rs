@@ -252,6 +252,7 @@ impl World for Real {
         let parts = words(self.setup.editor.as_deref().unwrap_or_default());
         let (program, arguments) = parts
             .split_first()
+            .filter(|(program, _)| !program.is_empty())
             .context("set $VISUAL or $EDITOR to edit the prompt")?;
         // Looked up as an agent is: on Windows an editor is often a `.cmd`.
         let status = crate::run::command_for(program)
@@ -281,7 +282,18 @@ fn words(text: &str) -> Vec<String> {
                 quote = Some(c);
                 word.get_or_insert_default();
             }
-            ('\\', None) => word.get_or_insert_default().extend(chars.next()),
+            // A backslash escapes a space, a quote or another backslash, and
+            // is itself anywhere else: `C:\tools\vim.exe` is a path.
+            ('\\', None) => {
+                let mut ahead = chars.clone();
+                let escaped = ahead
+                    .next()
+                    .filter(|next| next.is_whitespace() || matches!(next, '\'' | '"' | '\\'));
+                word.get_or_insert_default().push(escaped.unwrap_or('\\'));
+                if escaped.is_some() {
+                    chars = ahead;
+                }
+            }
             (c, None) if c.is_whitespace() => words.extend(word.take()),
             (c, _) => word.get_or_insert_default().push(c),
         }
@@ -292,8 +304,6 @@ fn words(text: &str) -> Vec<String> {
 
 const ESCAPE: char = '\u{1b}';
 const BELL: char = '\u{7}';
-/// The one-character form of `ESC \`, which closes a string sequence.
-const TERMINATOR: char = '\u{9c}';
 
 type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
 
@@ -312,7 +322,7 @@ fn skip_control(chars: &mut Chars) {
 fn skip_string(chars: &mut Chars) {
     while let Some(c) = chars.next_if(|next| *next != '\n') {
         match c {
-            BELL | TERMINATOR => break,
+            BELL => break,
             ESCAPE => {
                 chars.next_if_eq(&'\\');
                 break;
@@ -323,14 +333,16 @@ fn skip_string(chars: &mut Chars) {
 }
 
 /// What fits a terminal cell: no escape sequence, a tab as four spaces and no
-/// other control character. Line feeds stay. A carriage return alone rewrites
-/// its line, as a progress indicator means it to. Bytes that are not UTF-8
-/// become the replacement character.
+/// other control character. Line feeds stay. Text after a carriage return
+/// rewrites its line, as a progress indicator means it to. Bytes that are not
+/// UTF-8 become the replacement character.
 pub fn printable(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let mut out = String::with_capacity(text.len());
-    // Where the line being written starts in `out`.
+    // Where the line being written starts in `out`, and whether a carriage
+    // return has taken the cursor back there.
     let mut line = 0;
+    let mut rewrite = false;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -338,9 +350,8 @@ pub fn printable(bytes: &[u8]) -> String {
             // line feed after it is still a line feed.
             ESCAPE => match chars.next_if(|next| !next.is_control()) {
                 Some('[') => skip_control(&mut chars),
-                // An operating system command, a device control string and
-                // the three other strings a terminal takes.
-                Some(']' | 'P' | 'X' | '^' | '_') => skip_string(&mut chars),
+                // An operating system command or a device control string.
+                Some(']' | 'P') => skip_string(&mut chars),
                 // Intermediate bytes, then one final byte: `ESC ( B`.
                 Some(' '..='/') => {
                     while chars.next_if(|next| (' '..='/').contains(next)).is_some() {}
@@ -349,23 +360,26 @@ pub fn printable(bytes: &[u8]) -> String {
                 // Any other escape is two characters long.
                 _ => {}
             },
-            // The same introducers as one character each.
-            '\u{9b}' => skip_control(&mut chars),
-            '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => skip_string(&mut chars),
             '\n' => {
                 out.push('\n');
                 line = out.len();
+                rewrite = false;
             }
-            // Before a line feed it is only the end of the line; before more
-            // text it takes the cursor back, and that text replaces the line.
-            '\r' => {
-                if chars.peek().is_some_and(|next| *next != '\n') {
+            // It takes the cursor back to the start of the line. The line
+            // is only rewritten if text follows: before a line feed, or with
+            // nothing but a colour reset after it, the line stays.
+            '\r' => rewrite = true,
+            c if c.is_control() && c != '\t' => {}
+            c => {
+                if rewrite {
                     out.truncate(line);
+                    rewrite = false;
+                }
+                match c {
+                    '\t' => out.push_str("    "),
+                    c => out.push(c),
                 }
             }
-            '\t' => out.push_str("    "),
-            c if c.is_control() => {}
-            c => out.push(c),
         }
     }
     out
@@ -491,13 +505,61 @@ schedule = { at = \"07:00\" }
     }
 
     #[test]
-    fn device_strings_and_eight_bit_controls_are_left_out() {
+    fn a_device_control_string_is_left_out() {
         // A device control string, closed by `ESC \`.
         assert_eq!(printable(b"a\x1bP1$r0m\x1b\\b"), "ab");
-        // The same introducers as one character each.
-        assert_eq!(printable("a\u{9b}31mred".as_bytes()), "ared");
-        assert_eq!(printable("a\u{9d}0;title\u{9c}b".as_bytes()), "ab");
-        assert_eq!(printable("a\u{90}data\u{9c}b".as_bytes()), "ab");
+    }
+
+    /// Text decoded with the wrong character set is full of these characters,
+    /// and what follows one of them on the line is still text.
+    #[test]
+    fn a_stray_control_character_takes_nothing_with_it() {
+        assert_eq!(
+            printable("quote â€\u{9d} rest of line\nnext".as_bytes()),
+            "quote â€ rest of line\nnext"
+        );
+        assert_eq!(
+            printable("hyphen â€\u{90} rest\nnext".as_bytes()),
+            "hyphen â€ rest\nnext"
+        );
+        assert_eq!(
+            printable(b"keep\x1bXthis text\nnext"),
+            "keepthis text\nnext"
+        );
+    }
+
+    #[test]
+    fn a_carriage_return_erases_only_when_text_follows_it() {
+        // What a Windows text-mode writer leaves at the end of a line.
+        assert_eq!(printable(b"hello\r\r\nworld"), "hello\nworld");
+        // A colour reset after it is not text.
+        assert_eq!(printable(b"\x1b[31merror\r\x1b[0m\nnext"), "error\nnext");
+        assert_eq!(printable(b"a\r\x00\nb"), "a\nb");
+        assert_eq!(printable(b"done\r"), "done");
+        assert_eq!(printable(b"1\r\t2\n"), "    2\n");
+    }
+
+    #[test]
+    fn a_windows_path_keeps_its_backslashes() {
+        assert_eq!(words("C:\\tools\\vim.exe -n"), ["C:\\tools\\vim.exe", "-n"]);
+        assert_eq!(
+            words("\"C:\\Program Files\\x\\e.exe\" -w"),
+            ["C:\\Program Files\\x\\e.exe", "-w"]
+        );
+        // Only a space, a quote or another backslash is escaped by one.
+        assert_eq!(words("a\\ b c\\\\d e\\\"f"), ["a b", "c\\d", "e\"f"]);
+        assert_eq!(words("vim \\"), ["vim", "\\"]);
+    }
+
+    #[test]
+    fn an_editor_that_is_only_quotes_counts_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = Real::new(Setup {
+            editor: Some("\"\" -w".to_owned()),
+            ..setup(&dir, Box::new(Recorder::new()))
+        });
+        let error = real.edit(Path::new("prompt.md")).unwrap_err();
+        assert!(format!("{error:#}").contains("$EDITOR"));
     }
 
     #[test]
