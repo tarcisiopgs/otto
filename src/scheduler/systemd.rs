@@ -32,8 +32,10 @@ impl Systemd {
         format!("{PREFIX}{job_name}.service")
     }
 
-    /// Names of the jobs that have an otto service or timer in the directory, sorted.
-    pub fn installed(&self) -> Result<Vec<String>> {
+}
+
+impl Scheduler for Systemd {
+    fn installed(&self) -> Result<Vec<String>> {
         let mut names: Vec<String> = file_names(&self.units_dir)?
             .iter()
             .filter_map(|name| {
@@ -49,8 +51,7 @@ impl Systemd {
         Ok(names)
     }
 
-    /// Writes the units and starts the timer.
-    pub fn load(&self, job_name: &str, units: &[Unit], runner: &dyn Runner) -> Result<()> {
+    fn load(&self, job_name: &str, units: &[Unit], runner: &dyn Runner) -> Result<()> {
         write_units(&self.units_dir, units)?;
         must(runner, "systemctl", &["--user", "daemon-reload"])?;
         must(
@@ -60,8 +61,7 @@ impl Systemd {
         )
     }
 
-    /// Stops the timer and removes the units.
-    pub fn unload(&self, job_name: &str, runner: &dyn Runner) -> Result<()> {
+    fn unload(&self, job_name: &str, runner: &dyn Runner) -> Result<()> {
         let timer = Systemd::timer(job_name);
         // `disable` fails on a timer systemd has no file for.
         if self.units_dir.join(&timer).exists() {
@@ -71,9 +71,7 @@ impl Systemd {
         remove_unit(&self.units_dir.join(Systemd::service(job_name)))?;
         must(runner, "systemctl", &["--user", "daemon-reload"])
     }
-}
 
-impl Scheduler for Systemd {
     fn name(&self) -> &'static str {
         "systemd"
     }

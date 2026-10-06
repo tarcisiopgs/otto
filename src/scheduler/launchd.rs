@@ -44,9 +44,8 @@ fn domain(runner: &dyn Runner) -> Result<String> {
     Ok(format!("gui/{uid}"))
 }
 
-impl Launchd {
-    /// Names of the jobs that have an otto plist in the directory, sorted.
-    pub fn installed(&self) -> Result<Vec<String>> {
+impl Scheduler for Launchd {
+    fn installed(&self) -> Result<Vec<String>> {
         let mut names: Vec<String> = file_names(&self.agents_dir)?
             .iter()
             .filter_map(|name| name.strip_prefix(PREFIX)?.strip_suffix(".plist"))
@@ -57,8 +56,7 @@ impl Launchd {
         Ok(names)
     }
 
-    /// Writes the units and loads them into launchd.
-    pub fn load(&self, _job_name: &str, units: &[Unit], runner: &dyn Runner) -> Result<()> {
+    fn load(&self, _job_name: &str, units: &[Unit], runner: &dyn Runner) -> Result<()> {
         write_units(&self.agents_dir, units)?;
         let domain = domain(runner)?;
         for unit in units {
@@ -71,8 +69,7 @@ impl Launchd {
         Ok(())
     }
 
-    /// Unloads the job from launchd and removes its plist.
-    pub fn unload(&self, job_name: &str, runner: &dyn Runner) -> Result<()> {
+    fn unload(&self, job_name: &str, runner: &dyn Runner) -> Result<()> {
         let label = label(job_name);
         let target = format!("{}/{label}", domain(runner)?);
         let loaded = |runner: &dyn Runner| -> Result<bool> {
@@ -94,9 +91,7 @@ impl Launchd {
         }
         remove_unit(&self.agents_dir.join(format!("{label}.plist")))
     }
-}
 
-impl Scheduler for Launchd {
     fn name(&self) -> &'static str {
         "launchd"
     }
