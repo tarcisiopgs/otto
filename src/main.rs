@@ -1,6 +1,7 @@
 mod agent;
 mod config;
 mod scheduler;
+mod store;
 mod sync;
 
 use std::env;
