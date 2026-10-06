@@ -19,6 +19,8 @@ pub enum Action {
     Update,
     Remove,
     Unchanged,
+    /// The job needs a reload or a removal and has a run in progress.
+    Busy,
 }
 
 impl Action {
@@ -28,6 +30,7 @@ impl Action {
             Action::Update => "updated",
             Action::Remove => "removed",
             Action::Unchanged => "unchanged",
+            Action::Busy => "busy",
         }
     }
 }
@@ -100,6 +103,7 @@ fn sync_job(
     scheduler: &dyn Scheduler,
     ctx: &Context,
     runner: &dyn Runner,
+    is_running: &dyn Fn(&str) -> Result<bool>,
     dry_run: bool,
 ) -> Result<Action> {
     // A job that fails here keeps whatever unit it already has: a prompt on an
@@ -107,6 +111,10 @@ fn sync_job(
     preflight(job, &ctx.path)?;
     let units = scheduler.units(name, job, ctx)?;
     let action = decide(&units, &read_present(&units)?);
+    // Reloading stops a run in progress; the change waits for the next sync.
+    if action == Action::Update && is_running(name)? {
+        return Ok(Action::Busy);
+    }
     if dry_run {
         return Ok(action);
     }
@@ -120,7 +128,7 @@ fn sync_job(
             scheduler.unload(name, runner)?;
             load(name, &units, scheduler, runner)?;
         }
-        Action::Remove | Action::Unchanged => {}
+        Action::Remove | Action::Unchanged | Action::Busy => {}
     }
     Ok(action)
 }
@@ -145,12 +153,14 @@ fn prepare_logs(ctx: &Context) -> Result<()> {
 
 /// Makes the scheduler match `config`: jobs are added, updated or left alone,
 /// and an otto job the scheduler has that `config` lacks is removed. Each job
-/// stands alone, so one failure does not stop the others.
+/// stands alone, so one failure does not stop the others. A job `is_running`
+/// says has a run in progress is never reloaded or removed.
 pub fn sync(
     config: &Config,
     scheduler: &dyn Scheduler,
     ctx: &Context,
     runner: &dyn Runner,
+    is_running: &dyn Fn(&str) -> Result<bool>,
     dry_run: bool,
 ) -> Vec<Outcome> {
     let installed = match scheduler.installed() {
@@ -167,17 +177,18 @@ pub fn sync(
         .iter()
         .map(|(name, job)| Outcome {
             job: name.clone(),
-            result: sync_job(name, job, scheduler, ctx, runner, dry_run),
+            result: sync_job(name, job, scheduler, ctx, runner, is_running, dry_run),
         })
         .collect();
     for name in installed {
         if config.jobs.contains_key(&name) {
             continue;
         }
-        let result = if dry_run {
-            Ok(Action::Remove)
-        } else {
-            scheduler.unload(&name, runner).map(|()| Action::Remove)
+        let result = match is_running(&name) {
+            Err(error) => Err(error),
+            Ok(true) => Ok(Action::Busy),
+            Ok(false) if dry_run => Ok(Action::Remove),
+            Ok(false) => scheduler.unload(&name, runner).map(|()| Action::Remove),
         };
         outcomes.push(Outcome { job: name, result });
     }
@@ -252,6 +263,8 @@ mod tests {
         root: TempDir,
         ctx: Context,
         fake: Fake,
+        /// The jobs that have a run in progress.
+        running: RefCell<Vec<String>>,
     }
 
     impl World {
@@ -275,7 +288,17 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 broken: None,
             };
-            World { root, ctx, fake }
+            World {
+                root,
+                ctx,
+                fake,
+                running: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn set_running(&self, jobs: &[&str]) {
+            self.running
+                .replace(jobs.iter().map(|job| (*job).to_owned()).collect());
         }
 
         fn config(&self, text: &str) -> Config {
@@ -285,16 +308,24 @@ mod tests {
         /// Runs a sync and returns each job with its label, or `error: <message>`.
         fn sync(&self, text: &str, dry_run: bool) -> Vec<(String, String)> {
             let config = self.config(text);
-            sync(&config, &self.fake, &self.ctx, &Recorder::new(), dry_run)
-                .into_iter()
-                .map(|outcome| {
-                    let shown = match outcome.result {
-                        Ok(action) => action.label().to_owned(),
-                        Err(error) => format!("error: {error:#}"),
-                    };
-                    (outcome.job, shown)
-                })
-                .collect()
+            let is_running = |job: &str| Ok(self.running.borrow().iter().any(|name| name == job));
+            sync(
+                &config,
+                &self.fake,
+                &self.ctx,
+                &Recorder::new(),
+                &is_running,
+                dry_run,
+            )
+            .into_iter()
+            .map(|outcome| {
+                let shown = match outcome.result {
+                    Ok(action) => action.label().to_owned(),
+                    Err(error) => format!("error: {error:#}"),
+                };
+                (outcome.job, shown)
+            })
+            .collect()
         }
 
         fn calls(&self) -> Vec<String> {
@@ -485,5 +516,66 @@ mod tests {
 
         world.fake.broken = None;
         assert_eq!(world.sync(&later, false), [pair("report", "added")]);
+    }
+
+    #[test]
+    fn a_running_job_is_not_reloaded() {
+        let world = World::new();
+        world.sync(&job("report", "claude", "prompt.md", "09:00"), false);
+        world.set_running(&["report"]);
+
+        let outcome = world.sync(&job("report", "claude", "prompt.md", "10:00"), false);
+
+        assert_eq!(outcome, [pair("report", "busy")]);
+        assert_eq!(world.calls(), ["load report"]);
+        assert!(
+            fs::read_to_string(world.unit("report"))
+                .unwrap()
+                .starts_with("09:00")
+        );
+    }
+
+    #[test]
+    fn a_running_job_is_not_removed() {
+        let world = World::new();
+        world.sync(&job("report", "claude", "prompt.md", "09:00"), false);
+        world.set_running(&["report"]);
+
+        assert_eq!(world.sync("", false), [pair("report", "busy")]);
+        assert_eq!(world.calls(), ["load report"]);
+        assert!(world.unit("report").exists());
+    }
+
+    #[test]
+    fn busy_ends_once_the_run_is_over() {
+        let world = World::new();
+        world.sync(&job("report", "claude", "prompt.md", "09:00"), false);
+        let later = job("report", "claude", "prompt.md", "10:00");
+        world.set_running(&["report"]);
+        world.sync(&later, false);
+
+        world.set_running(&[]);
+        assert_eq!(world.sync(&later, false), [pair("report", "updated")]);
+    }
+
+    #[test]
+    fn a_running_job_that_needs_nothing_stays_unchanged() {
+        let world = World::new();
+        let text = job("report", "claude", "prompt.md", "09:00");
+        world.sync(&text, false);
+        world.set_running(&["report"]);
+
+        assert_eq!(world.sync(&text, false), [pair("report", "unchanged")]);
+    }
+
+    #[test]
+    fn dry_run_reports_busy_too() {
+        let world = World::new();
+        world.sync(&job("report", "claude", "prompt.md", "09:00"), false);
+        world.set_running(&["report"]);
+
+        let outcome = world.sync(&job("report", "claude", "prompt.md", "10:00"), true);
+
+        assert_eq!(outcome, [pair("report", "busy")]);
     }
 }
