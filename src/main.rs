@@ -1,8 +1,6 @@
 mod agent;
 mod atomic;
 mod config;
-// Nothing writes the jobs file yet: the job form of the terminal UI will.
-#[allow(dead_code)]
 mod jobs_file;
 mod next;
 mod process;
@@ -330,6 +328,7 @@ fn screen(config_path: &Path) -> Result<ExitCode> {
         otto: env::current_exe().context("cannot locate the otto binary")?,
         editor,
         zone: zone.clone(),
+        path: env::var_os("PATH"),
     });
     tui::run(&mut world, &Timestamp::now, &zone)?;
     Ok(ExitCode::SUCCESS)

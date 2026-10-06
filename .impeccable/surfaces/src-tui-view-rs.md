@@ -17,7 +17,7 @@ Constraints: a grid of character cells, no typeface of its own; the terminal's o
 
 THESIS: otto is a logbook. Every job is an entry and every run leaves a mark in it; the user reads the history without opening anything. It refuses the bordered two-pane list-and-detail layout this category always ships.
 
-OWN-WORLD: lowercase throughout. No boxes: entries are separated by one dim ruled line that grows out of a margin rule (`│`, `├───`). One accent, school-bus yellow (the terminal's yellow), for the selection marker, a run in progress and anything waiting on the user; red only for a failure or an error; dim for rules and secondary facts. Run marks are distinct glyphs, never colour alone: `✓` ok, `✗` failed, `·` did not start the agent (skipped, paused), `!` interrupted, `●` running.
+OWN-WORLD: lowercase throughout. No boxes: entries are separated by one dim ruled line that grows out of a margin rule (`│`, `├───`). One accent, school-bus yellow (the terminal's yellow), on two glyphs only, the selection marker `▸` and the mark of a run in progress `●`, while what waits on the user is bold in the terminal's own foreground; red only for a failure or an error; dim for rules and secondary facts. Run marks are distinct glyphs, never colour alone: `✓` ok, `✗` failed, `·` did not start the agent (skipped, paused), `!` interrupted, `●` running.
 
 STORY: the user sees which routines are healthy at a glance from the strip of marks, sees when each runs next in plain words (`today 16:05`), and reaches a run's output in two keystrokes.
 
@@ -32,4 +32,4 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 ## Unresolved
 
 - Impeccable does not recognise `terminal` as a platform and treats the project as web; its detector, comps and screenshots do not apply to a ratatui screen. The review of this surface is done on the text the screen renders.
-- The form and the sync preview are drawn in later pull requests and inherit this world.
+- The job form is drawn and described in DESIGN.md. The sync preview is drawn in a later pull request and inherits this world.

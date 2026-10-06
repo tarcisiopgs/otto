@@ -3,6 +3,7 @@
 //! and the drawing can be tested without either.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -13,10 +14,12 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 use crate::config::{self, Config, Job};
+use crate::jobs_file::{self, JobSpec};
 use crate::next::{self, Next};
 use crate::process::{self, Children};
 use crate::scheduler::runner::Runner;
 use crate::store::{Outcome, Run, State, Store};
+use crate::which;
 
 /// How much of the end of a run's output the UI loads.
 pub const LOG_TAIL: u64 = 1_048_576;
@@ -76,6 +79,16 @@ pub trait World {
     fn stop(&self, job: &str, pid: u32) -> Result<()>;
     /// Opens `path` in the user's editor and waits for it to close.
     fn edit(&self, path: &Path) -> Result<()>;
+    /// The jobs file as it is on disk; empty when there is none yet.
+    fn text(&self) -> Result<String>;
+    /// Writes `text` over the jobs file, which must still read as `read`.
+    fn save(&mut self, read: &str, text: &str) -> Result<()>;
+    /// What a sync would refuse this job for: a working directory that is
+    /// not there, an agent that is not on the `PATH`.
+    fn warnings(&self, spec: &JobSpec) -> Vec<String>;
+    /// Sees that the prompt file exists, creating it empty when it does not.
+    /// Returns the file when it was created, which is when it needs writing.
+    fn ensure_prompt(&self, prompt: &str) -> Result<Option<PathBuf>>;
 }
 
 /// What the real world is built from. Everything read from the environment
@@ -90,6 +103,8 @@ pub struct Setup {
     /// `$VISUAL`, or else `$EDITOR`.
     pub editor: Option<String>,
     pub zone: TimeZone,
+    /// `$PATH`, where an agent is looked for.
+    pub path: Option<OsString>,
 }
 
 /// The machine otto is running on.
@@ -113,6 +128,13 @@ impl Real {
             jobs: BTreeMap::new(),
             broken: None,
         }
+    }
+
+    /// A path of the jobs file as the run will see it: `~` expanded, and a
+    /// relative one taken from where the jobs file is.
+    fn resolved(&self, path: &str) -> PathBuf {
+        let base = self.setup.config.parent().unwrap_or(Path::new("."));
+        config::resolve(Path::new(path), base, config::home_dir().as_deref())
     }
 
     /// Reads the jobs file again. One that is missing is an empty list; one
@@ -265,6 +287,52 @@ impl World for Real {
         }
         Ok(())
     }
+
+    fn text(&self) -> Result<String> {
+        let path = &self.setup.config;
+        match fs::read_to_string(path) {
+            Ok(text) => Ok(text),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(String::new()),
+            Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+        }
+    }
+
+    fn save(&mut self, read: &str, text: &str) -> Result<()> {
+        jobs_file::save(&self.setup.config, read, text)
+    }
+
+    fn warnings(&self, spec: &JobSpec) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let workdir = self.resolved(&spec.workdir);
+        if !spec.workdir.is_empty() && !workdir.is_dir() {
+            // Without the path: the form shows it on the row above, and the
+            // line this goes on is too short for it and a second note.
+            warnings.push("workdir not found".to_owned());
+        }
+        let program = spec.agent.program();
+        let on_the_path = self
+            .setup
+            .path
+            .as_deref()
+            .is_some_and(|path| which::find(program, path).is_some());
+        if !on_the_path {
+            warnings.push(format!("{program} not found in PATH"));
+        }
+        warnings
+    }
+
+    fn ensure_prompt(&self, prompt: &str) -> Result<Option<PathBuf>> {
+        let path = self.resolved(prompt);
+        if path.exists() {
+            return Ok(None);
+        }
+        let cannot_create = || format!("cannot create the prompt file {}", path.display());
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).with_context(cannot_create)?;
+        }
+        File::create_new(&path).with_context(cannot_create)?;
+        Ok(Some(path))
+    }
 }
 
 /// The words of a command line as a shell reads them: split at spaces, with
@@ -393,16 +461,27 @@ pub struct Fake {
     pub log: Log,
     /// When set, everything that can fail fails with this message.
     pub fail: Option<String>,
+    /// When set as well, only the call whose line starts with this fails.
+    pub fail_on: Option<String>,
     pub calls: std::cell::RefCell<Vec<String>>,
+    /// The jobs file as `text` gives it.
+    pub text: String,
+    pub warnings: Vec<String>,
+    /// The prompt file `ensure_prompt` says it created.
+    pub created: Option<PathBuf>,
 }
 
 #[cfg(test)]
 impl Fake {
     fn call(&self, line: String) -> Result<()> {
+        let chosen = self
+            .fail_on
+            .as_deref()
+            .is_none_or(|start| line.starts_with(start));
         self.calls.borrow_mut().push(line);
         match &self.fail {
-            Some(message) => bail!("{message}"),
-            None => Ok(()),
+            Some(message) if chosen => bail!("{message}"),
+            _ => Ok(()),
         }
     }
 }
@@ -433,6 +512,24 @@ impl World for Fake {
 
     fn edit(&self, path: &Path) -> Result<()> {
         self.call(format!("edit {}", path.display()))
+    }
+
+    fn text(&self) -> Result<String> {
+        self.call("text".to_owned())?;
+        Ok(self.text.clone())
+    }
+
+    fn save(&mut self, _read: &str, text: &str) -> Result<()> {
+        self.call(format!("save {text}"))
+    }
+
+    fn warnings(&self, _spec: &JobSpec) -> Vec<String> {
+        self.warnings.clone()
+    }
+
+    fn ensure_prompt(&self, prompt: &str) -> Result<Option<PathBuf>> {
+        self.call(format!("ensure_prompt {prompt}"))?;
+        Ok(self.created.clone())
     }
 }
 
@@ -475,6 +572,7 @@ schedule = { at = \"07:00\" }
             otto: PathBuf::from("otto"),
             editor: None,
             zone: TimeZone::get("America/Sao_Paulo").unwrap(),
+            path: None,
         }
     }
 
@@ -575,6 +673,67 @@ schedule = { at = \"07:00\" }
         assert!(words("   ").is_empty());
         // A quote that is never closed takes the rest.
         assert_eq!(words("vim 'a b"), ["vim", "a b"]);
+    }
+
+    #[test]
+    fn the_jobs_file_is_read_and_written_as_it_is() {
+        let (dir, mut real, _store) = machine(None);
+        assert_eq!(real.text().unwrap(), "");
+        real.save("", JOBS).unwrap();
+        assert_eq!(real.text().unwrap(), JOBS);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("jobs.toml")).unwrap(),
+            JOBS
+        );
+        // Written from a reading that is no longer what is on disk: refused.
+        let error = real.save("", "# other\n").unwrap_err();
+        assert!(format!("{error:#}").contains("changed on disk"));
+        assert_eq!(real.text().unwrap(), JOBS);
+    }
+
+    fn spec(workdir: &str) -> JobSpec {
+        JobSpec {
+            agent: crate::agent::Agent::Claude,
+            prompt: "prompts/nightly.md".to_owned(),
+            workdir: workdir.to_owned(),
+            at: "02:00".to_owned(),
+            days: Vec::new(),
+            args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_job_a_sync_would_refuse_is_warned_about() {
+        let (dir, real, _store) = machine(Some(JOBS));
+        let warnings = real.warnings(&spec("not-there"));
+        assert_eq!(
+            warnings,
+            [
+                "workdir not found".to_owned(),
+                "claude not found in PATH".to_owned(),
+            ]
+        );
+        let _ = &dir;
+        // A directory is taken from where the jobs file is; none typed yet is
+        // not a directory that is missing.
+        fs::create_dir(dir.path().join("work")).unwrap();
+        assert_eq!(real.warnings(&spec("work")), ["claude not found in PATH"]);
+        assert_eq!(real.warnings(&spec("")), ["claude not found in PATH"]);
+    }
+
+    #[test]
+    fn a_missing_prompt_file_is_created_beside_the_jobs_file() {
+        let (dir, real, _store) = machine(Some(JOBS));
+        let path = dir.path().join("prompts").join("nightly.md");
+        assert_eq!(
+            real.ensure_prompt("prompts/nightly.md").unwrap(),
+            Some(path.clone())
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        // One that is there is left as it is.
+        fs::write(&path, "do the thing\n").unwrap();
+        assert_eq!(real.ensure_prompt("prompts/nightly.md").unwrap(), None);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "do the thing\n");
     }
 
     #[test]
@@ -881,6 +1040,33 @@ mod unix_tests {
         });
         real.edit(Path::new("/prompts/report.md")).unwrap();
         assert_eq!(output(&dir), "--wait /prompts/report.md");
+    }
+
+    #[test]
+    fn an_agent_on_the_path_is_not_warned_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::write(bin.join("claude"), "#!/bin/sh\n").unwrap();
+        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+        let real = Real::new(Setup {
+            path: Some(bin.into_os_string()),
+            ..setup(&dir, Box::new(Recorder::new()))
+        });
+        let here = JobSpec {
+            agent: crate::agent::Agent::Claude,
+            prompt: "p.md".to_owned(),
+            workdir: ".".to_owned(),
+            at: "02:00".to_owned(),
+            days: Vec::new(),
+            args: Vec::new(),
+        };
+        assert!(real.warnings(&here).is_empty());
+        let codex = JobSpec {
+            agent: crate::agent::Agent::Codex,
+            ..here
+        };
+        assert_eq!(real.warnings(&codex), ["codex not found in PATH"]);
     }
 
     #[test]

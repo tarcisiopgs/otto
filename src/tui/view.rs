@@ -7,10 +7,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use crate::agent::Agent;
 use crate::config::{Schedule, Weekday};
 use crate::next::{self, Next};
 use crate::store::{Outcome, Run};
 use crate::tui::app::{App, Confirm, ENTRY, Screen};
+use crate::tui::form::{Field, Focus, Form};
 use crate::tui::text::{cut, fit, tail, width as width_in_columns, wrapped};
 use crate::tui::world::JobView;
 
@@ -55,11 +57,20 @@ pub fn draw(frame: &mut Frame, app: &App, now: &Zoned) {
     }
     let width = usize::from(area.width);
     let rows = page(area.height);
+    let mut cursor = None;
     let mut body = match app.screen {
         Screen::Jobs => jobs(app, now, width, rows),
         Screen::Job => job(app, now, width, rows),
         Screen::Log => log(app, rows),
         Screen::Help => help(),
+        Screen::Form => match &app.form {
+            Some(form) => {
+                let (lines, at) = fields(form, width);
+                cursor = Some(at);
+                lines
+            }
+            None => Vec::new(),
+        },
     };
     body.resize(rows, Line::default());
 
@@ -68,6 +79,12 @@ pub fn draw(frame: &mut Frame, app: &App, now: &Zoned) {
     lines.push(notice(app, width));
     lines.push(bar(app, width));
     frame.render_widget(Paragraph::new(lines), area);
+    // The terminal's own cursor shows where typing goes. It is only shown
+    // while a field is being filled, and never under a question.
+    if let (Some((column, row)), None) = (cursor, &app.confirm) {
+        let fits = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+        frame.set_cursor_position((fits(column), fits(row + 2)));
+    }
 }
 
 /// The one accent, kept to the two glyphs that mean "here" and "now": the
@@ -140,6 +157,10 @@ fn header<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Line<'a> 
             None => name.to_owned(),
         },
         Screen::Help => "help".to_owned(),
+        Screen::Form => match app.form.as_ref().and_then(|form| form.editing.as_deref()) {
+            Some(job) => format!("edit {job}"),
+            None => "new job".to_owned(),
+        },
     };
     let right = match (app.screen, run) {
         (Screen::Log, Some(run)) => {
@@ -548,6 +569,150 @@ fn log(app: &App, rows: usize) -> Vec<Line<'_>> {
         .collect()
 }
 
+/// Where the value of a field starts: after the marker, the margin rule and
+/// the label.
+const VALUE: usize = 12;
+
+/// A field that takes text, as much of it as fits, and where its cursor is.
+/// A text longer than the room shows the part the cursor is in, with a mark
+/// at each end that was cut.
+fn typed(field: &Field, room: usize) -> (Vec<Span<'static>>, usize) {
+    // A line break is one argument ending and the next beginning.
+    let shown = |text: &str| text.replace('\n', " ⏎ ");
+    let before = shown(&field.text()[..field.cursor()]);
+    let after = shown(&field.text()[field.cursor()..]);
+    // Room for the cursor itself, which sits after the text.
+    let room = room.saturating_sub(1).max(1);
+    // Some of the room is kept for what follows the cursor, so that being
+    // in the middle of a text does not hide the rest of it.
+    let kept = width_in_columns(&after).min(room / 3);
+    let before = tail(&before, room - kept);
+    let column = width_in_columns(&before);
+    let after = cut(&after, room - column);
+    // The mark between two arguments is neither of them.
+    let mut spans = Vec::new();
+    for (index, piece) in format!("{before}{after}").split('⏎').enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("⏎", dim()));
+        }
+        spans.push(Span::raw(piece.to_owned()));
+    }
+    (spans, column)
+}
+
+/// A choice among a few: the chosen ones carry a mark, the others a dot.
+fn choice(name: &str, chosen: bool) -> Vec<Span<'static>> {
+    if chosen {
+        vec![Span::raw("✓"), Span::styled(name.to_owned(), strong())]
+    } else {
+        vec![Span::styled(format!("·{name}"), dim())]
+    }
+}
+
+/// The form: one opened entry, each field a fact behind the margin rule in
+/// the order an entry reads, and where on it the cursor goes, as a column and
+/// a row of the body.
+fn fields(form: &Form, width: usize) -> (Vec<Line<'_>>, (usize, usize)) {
+    const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    let room = width.saturating_sub(VALUE + 1);
+    let mut cursor = (VALUE, 0);
+    let mut lines = Vec::new();
+    let order = [
+        (Focus::Name, "name"),
+        (Focus::Agent, "agent"),
+        (Focus::At, "at"),
+        (Focus::Days, "days"),
+        (Focus::Workdir, "workdir"),
+        (Focus::Prompt, "prompt"),
+        (Focus::Args, "args"),
+    ];
+    for (row, (focus, label)) in order.into_iter().enumerate() {
+        let focused = form.focus == focus;
+        let mut spans = vec![
+            Span::styled(if focused { "▸" } else { " " }, accent()),
+            Span::styled("│ ", dim()),
+            Span::styled(
+                format!("{label:<9}"),
+                if focused { strong() } else { dim() },
+            ),
+        ];
+        let mut column = 0;
+        let text = match focus {
+            Focus::Name => Some(&form.name),
+            Focus::Workdir => Some(&form.workdir),
+            Focus::At => Some(&form.at),
+            Focus::Args => Some(&form.args),
+            Focus::Prompt => Some(&form.prompt),
+            Focus::Agent | Focus::Days => None,
+        };
+        match (focus, text) {
+            // Arguments the field cannot hold are not shown as if it could.
+            (Focus::Args, _) if form.args_by_hand => {
+                spans.push(Span::styled("written by hand in the jobs file", dim()));
+            }
+            (_, Some(field)) => {
+                let (shown, at) = typed(field, room);
+                column = at;
+                // A job that exists keeps its name: it is shown, not offered.
+                let fixed = focus == Focus::Name && form.editing.is_some();
+                spans.extend(shown.into_iter().map(|span| match fixed {
+                    true => span.style(dim()),
+                    false => span,
+                }));
+            }
+            (Focus::Agent, _) => {
+                for (index, agent) in Agent::ALL.into_iter().enumerate() {
+                    if index > 0 {
+                        spans.push(Span::raw("  "));
+                    }
+                    if agent == form.agent {
+                        column = width_of(&spans) - VALUE;
+                    }
+                    spans.extend(choice(agent.program(), agent == form.agent));
+                }
+            }
+            (_, None) => {
+                for (index, day) in DAYS.into_iter().enumerate() {
+                    if index > 0 {
+                        spans.push(Span::raw(" "));
+                    }
+                    if index == form.day {
+                        column = width_of(&spans) - VALUE;
+                    }
+                    spans.extend(choice(day, form.days[index]));
+                }
+                // None marked is not no day: it is said in the list's word.
+                if form.spec().days.is_empty() {
+                    spans.push(Span::styled("  daily", dim()));
+                }
+            }
+        }
+        if focused {
+            cursor = (VALUE + column, row);
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(rule(width));
+    (lines, cursor)
+}
+
+/// What the field in focus calls for, in a line.
+fn hint(form: &Form) -> Option<&'static str> {
+    match form.focus {
+        Focus::Name if form.editing.is_some() => None,
+        Focus::Name => Some("lowercase letters, digits and dashes"),
+        Focus::Agent => None,
+        Focus::At => Some("24-hour time, as in 16:05"),
+        Focus::Days => Some("no day marked runs every day"),
+        Focus::Workdir => Some("the directory the agent runs in"),
+        Focus::Prompt => Some("created and opened in your editor if it is not there"),
+        Focus::Args if form.args_by_hand => {
+            Some("these arguments can only be changed in the jobs file")
+        }
+        Focus::Args => Some("a scheduled run has nobody to answer a permission prompt"),
+    }
+}
+
 /// What the job keys do. One screen of the smallest terminal holds these and
 /// the column beside them.
 const ACTIONS: [(&str, &str); 8] = [
@@ -555,10 +720,10 @@ const ACTIONS: [(&str, &str); 8] = [
     ("esc", "go back"),
     ("r", "run the job now"),
     ("x", "stop the run in progress"),
-    ("p", "pause the schedule"),
-    ("s", "skip the next run"),
-    ("u", "resume the schedule"),
+    ("p s u", "pause, skip next, resume"),
     ("e", "edit the prompt"),
+    ("n", "new job"),
+    ("E d", "edit, delete the job"),
 ];
 
 const MOVES: [(&str, &str); 5] = [
@@ -621,7 +786,23 @@ fn notice(app: &App, width: usize) -> Line<'_> {
         let style = if notice.error { bad() } else { Style::new() };
         return Line::styled(format!(" {}", cut(&notice.text, room)), style);
     }
-    // With nothing to tell, the log screen says where it is in the output.
+    // On the form: why it could not be saved, until the job changes; what
+    // the arguments are for, which is never out of sight on that field; what
+    // saving would run into; and what the field in focus calls for.
+    if let (Screen::Form, Some(form)) = (&app.screen, &app.form) {
+        if let Some(reason) = &app.reason {
+            return Line::styled(format!(" {}", cut(reason, room)), bad());
+        }
+        let note = || format!("note: {}", app.warnings.join("; "));
+        let text = match (form.focus, hint(form)) {
+            (Focus::Args, Some(hint)) => hint.to_owned(),
+            _ if !app.warnings.is_empty() => note(),
+            (_, Some(hint)) => hint.to_owned(),
+            (_, None) => return Line::default(),
+        };
+        return Line::raw(format!(" {}", cut(&text, room)));
+    }
+    // And the log screen says where it is in the output.
     let (Screen::Log, Some(log)) = (&app.screen, &app.log) else {
         return Line::default();
     };
@@ -647,43 +828,86 @@ fn notice(app: &App, width: usize) -> Line<'_> {
 /// The keys of the screen, or the question the app is waiting on.
 fn bar(app: &App, width: usize) -> Line<'_> {
     if let Some(confirm) = &app.confirm {
-        let question = match confirm {
-            // Room is kept for the two answers after the name.
-            Confirm::Stop { job, .. } => {
-                format!(" stop {}?", cut(job, width.saturating_sub(34)))
-            }
+        // Each answer is named for what it does. Room is kept for the two
+        // answers after the name.
+        let name = |job: &str| cut(job, width.saturating_sub(34));
+        let (question, yes, no) = match confirm {
+            Confirm::Stop { job, .. } => (format!(" stop {}?", name(job)), "stop", "keep running"),
+            Confirm::Delete { job } => (format!(" delete {}?", name(job)), "delete", "keep"),
+            Confirm::Discard => (
+                " discard the changes?".to_owned(),
+                "discard",
+                "keep editing",
+            ),
         };
         return Line::from(vec![
             Span::styled(question, strong()),
             Span::raw("  "),
             Span::styled("y", strong()),
-            Span::styled(" stop  ", dim()),
+            Span::styled(format!(" {yes}  "), dim()),
             Span::styled("n", strong()),
-            Span::styled(" keep running", dim()),
+            Span::styled(format!(" {no}"), dim()),
         ]);
     }
     type Key = (&'static str, &'static str);
     // A job that is running can be stopped, one that is not can be run: the
     // bar offers the one that would do something.
-    let running = app.selected().is_some_and(|job| job.running().is_some());
-    let job: [Key; 5] = [
-        if running { ("x", "stop") } else { ("r", "run") },
-        ("p", "pause"),
-        ("s", "skip"),
-        ("u", "resume"),
-        ("e", "prompt"),
-    ];
+    let chosen = app.selected();
+    let running = chosen.is_some_and(|job| job.running().is_some());
+    let state = chosen.map(|job| job.state).unwrap_or_default();
+    let mut job: Vec<Key> = vec![if running { ("x", "stop") } else { ("r", "run") }];
+    if !state.paused {
+        job.push(("p", "pause"));
+    }
+    if !state.paused && !state.skip_next {
+        job.push(("s", "skip"));
+    }
+    if state.paused || state.skip_next {
+        job.push(("u", "resume"));
+    }
+    job.push(("e", "prompt"));
     // `always` shows whatever the width: the way back, to the help and out.
     // The actions give way to it on a narrow terminal, last first.
+    let manage: [Key; 2] = [("E", "edit"), ("d", "delete")];
     let (actions, always): (Vec<Key>, [Key; 2]) = match app.screen {
+        // With no job yet, creating one is all there is to do.
+        Screen::Jobs if app.snapshot.jobs.is_empty() => {
+            (vec![("n", "new")], [("?", "help"), ("q", "quit")])
+        }
         Screen::Jobs => (
-            [("enter", "open")].into_iter().chain(job).collect(),
+            [("enter", "open")]
+                .into_iter()
+                .chain(job)
+                .chain([("n", "new")])
+                .chain(manage)
+                .collect(),
             [("?", "help"), ("q", "quit")],
         ),
         Screen::Job => (
-            [("enter", "log")].into_iter().chain(job).collect(),
+            [("enter", "log")]
+                .into_iter()
+                .chain(job)
+                .chain(manage)
+                .collect(),
             [("esc", "back"), ("?", "help")],
         ),
+        // Every letter is text here: what is left are these, and what the
+        // field in focus takes besides text.
+        Screen::Form => {
+            let mut keys: Vec<Key> = vec![("tab", "next")];
+            match app.form.as_ref().map(|form| form.focus) {
+                Some(Focus::Agent | Focus::Days) => {
+                    keys.extend([("←→", "move"), ("space", "mark")])
+                }
+                // A line of its own for the next argument, where the field
+                // takes typing at all.
+                Some(Focus::Args) if !app.form.as_ref().is_some_and(|form| form.args_by_hand) => {
+                    keys.push(("enter", "line"));
+                }
+                _ => {}
+            }
+            (keys, [("ctrl-s", "save"), ("esc", "cancel")])
+        }
         Screen::Log => (
             vec![("↑↓", "scroll"), ("g", "top"), ("G", "end")],
             [("esc", "back"), ("?", "help")],
@@ -691,11 +915,9 @@ fn bar(app: &App, width: usize) -> Line<'_> {
         Screen::Help => (Vec::new(), [("esc", "back"), ("q", "quit")]),
     };
     let size = |(key, what): &Key| width_in_columns(key) + 1 + width_in_columns(what) + 2;
-    let mut room = width
-        .saturating_sub(1)
-        .saturating_sub(always.iter().map(size).sum::<usize>())
-        // The last one needs no gap after it.
-        + 2;
+    // A column before the first, one after the last, and the last needs no
+    // gap after it: what is left is the width less what always shows.
+    let mut room = width.saturating_sub(always.iter().map(size).sum::<usize>());
     let mut spans = vec![Span::raw(" ")];
     let mut show = |(key, what): Key| {
         spans.push(Span::styled(key, strong()));
@@ -728,6 +950,7 @@ mod tests {
     use crate::next::Next;
     use crate::store::{Outcome, Run, State, Trigger};
     use crate::tui::app::{Action, Notice};
+    use crate::tui::form::{Edit, Focus};
     use crate::tui::world::{JobView, Log, Snapshot};
 
     fn local(text: &str) -> Zoned {
@@ -1040,9 +1263,7 @@ mod tests {
     fn every_action_of_the_screen_is_in_the_shortcut_bar() {
         let text = screen(&app(vec![job("report")]), 80, 24);
         let bar = text.lines().last().unwrap();
-        for word in [
-            "open", "run", "pause", "skip", "resume", "prompt", "help", "quit",
-        ] {
+        for word in ["open", "run", "pause", "skip", "prompt", "help", "quit"] {
             assert!(bar.contains(word), "{word:?} is missing from {bar:?}");
         }
     }
@@ -1068,6 +1289,36 @@ mod tests {
         let opened = screen(&app, 80, 24);
         let bar = opened.lines().last().unwrap();
         assert!(bar.contains("x stop") && !bar.contains("r run"), "{bar:?}");
+    }
+
+    #[test]
+    fn the_bar_offers_only_what_would_change_the_schedule() {
+        let bar = |state: State| {
+            let job = JobView {
+                state,
+                ..job("report")
+            };
+            let text = screen(&app(vec![job]), 100, 24);
+            text.lines().last().unwrap().to_owned()
+        };
+        let active = bar(State::default());
+        assert!(active.contains("p pause") && active.contains("s skip"));
+        assert!(!active.contains("u resume"), "{active:?}");
+        let paused = bar(State {
+            paused: true,
+            skip_next: false,
+        });
+        assert!(paused.contains("u resume"));
+        assert!(
+            !paused.contains("p pause") && !paused.contains("s skip"),
+            "{paused:?}"
+        );
+        let skipping = bar(State {
+            paused: false,
+            skip_next: true,
+        });
+        assert!(skipping.contains("p pause") && skipping.contains("u resume"));
+        assert!(!skipping.contains("s skip"), "{skipping:?}");
     }
 
     #[test]
@@ -1107,10 +1358,10 @@ mod tests {
         for expected in [
             "run the job now",
             "stop the run in progress",
-            "pause the schedule",
-            "skip the next run",
-            "resume the schedule",
+            "pause, skip next, resume",
             "edit the prompt",
+            "new job",
+            "edit, delete the job",
             "quit",
         ] {
             assert!(text.contains(expected), "{expected:?} is missing:\n{text}");
@@ -1140,8 +1391,10 @@ mod tests {
         let bar = text.lines().last().unwrap().trim_end();
         // The way to the help and the way out stay; an action gives way.
         assert!(bar.ends_with("? help  q quit"), "{bar:?}");
-        assert!(bar.contains("u resume"));
-        assert!(!bar.contains("prompt"));
+        assert!(bar.contains("e prompt"));
+        assert!(!bar.contains("n new"));
+        // A column is kept at the end, as on every other row.
+        assert!(bar.chars().count() < 68, "{bar:?}");
 
         let narrow = screen(&app(vec![job("report")]), MIN.0, 24);
         let bar = narrow.lines().last().unwrap().trim_end();
@@ -1418,7 +1671,7 @@ mod tests {
         app.act(Action::Help);
         let text = screen(&app, MIN.0, MIN.1);
         assert!(text.contains("stop the run in progress  ?"), "{text}");
-        assert!(text.contains("skip the next run  "), "{text}");
+        assert!(text.contains("pause, skip next, resume  q"), "{text}");
     }
 
     #[test]
@@ -1442,6 +1695,238 @@ mod tests {
         let text = screen(&app, 80, 24);
         let line = text.lines().find(|line| line.contains("xxx")).unwrap();
         assert!(line.trim_end().ends_with('…'), "{line:?}");
+    }
+
+    const FILE: &str = include_str!("../../examples/jobs.toml");
+
+    /// The form for a new job, with these typed into the name.
+    fn creating(name: &str) -> App {
+        let mut app = app(vec![job("report")]);
+        app.open_form(Ok(FILE.to_owned()), None);
+        for c in name.chars() {
+            app.act(Action::Input(Edit::Insert(c)));
+        }
+        app
+    }
+
+    /// The screen, and where the terminal's cursor was left.
+    fn screen_and_cursor(app: &App, width: u16, height: u16) -> (String, (u16, u16)) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, app, &now())).unwrap();
+        let position = terminal.get_cursor_position().unwrap();
+        (screen(app, width, height), (position.x, position.y))
+    }
+
+    /// Puts the focus of the form on a field.
+    fn on(app: &mut App, focus: Focus) {
+        app.form.as_mut().unwrap().focus = focus;
+    }
+
+    #[test]
+    fn the_form_is_one_opened_entry_with_a_fact_to_a_field() {
+        let mut app = app(vec![job("report")]);
+        app.open_form(Ok(FILE.to_owned()), Some("linear-updates"));
+        let text = screen(&app, MIN.0, MIN.1);
+        let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+        assert_eq!(
+            lines[0].split("  ").next(),
+            Some(" otto · edit linear-updates")
+        );
+        // In the order an entry reads: what and when, then where and with what.
+        assert_eq!(
+            &lines[2..10],
+            [
+                " │ name     linear-updates",
+                "▸│ agent    ✓claude  ·codex",
+                " │ at       16:05",
+                " │ days     ✓mon ✓tue ✓wed ✓thu ✓fri ·sat ·sun",
+                " │ workdir  ~/Workspace/app",
+                " │ prompt   prompts/linear-updates.md",
+                " │ args     --permission-mode ⏎ auto",
+                " ├─────────────────────────────────────────────────────────",
+            ]
+        );
+        assert_eq!(
+            lines[11],
+            " tab next  ←→ move  space mark  ctrl-s save  esc cancel"
+        );
+    }
+
+    #[test]
+    fn the_bar_of_the_form_follows_the_field() {
+        let mut app = creating("x");
+        let bar = |app: &App| {
+            let text = screen(app, MIN.0, MIN.1);
+            text.lines().last().unwrap().trim_end().to_owned()
+        };
+        // Space is a space in a text.
+        assert_eq!(bar(&app), " tab next  ctrl-s save  esc cancel");
+        on(&mut app, Focus::Days);
+        assert_eq!(
+            bar(&app),
+            " tab next  ←→ move  space mark  ctrl-s save  esc cancel"
+        );
+        on(&mut app, Focus::Args);
+        assert_eq!(bar(&app), " tab next  enter line  ctrl-s save  esc cancel");
+    }
+
+    #[test]
+    fn no_day_marked_reads_as_daily() {
+        let mut app = creating("x");
+        assert!(screen(&app, MIN.0, MIN.1).contains("·fri ·sat ·sun  daily"));
+        on(&mut app, Focus::Days);
+        app.act(Action::Toggle);
+        assert!(!screen(&app, MIN.0, MIN.1).contains("daily"));
+    }
+
+    #[test]
+    fn the_cursor_is_where_typing_goes() {
+        let app = creating("ni");
+        let (text, cursor) = screen_and_cursor(&app, 80, 24);
+        assert!(text.contains("▸│ name     ni"), "{text}");
+        assert!(text.contains("otto · new job"));
+        assert_eq!(cursor, (14, 2));
+
+        // On a choice it sits on the one it would mark.
+        let mut app = creating("");
+        on(&mut app, Focus::Days);
+        app.act(Action::Input(Edit::Right));
+        app.act(Action::Input(Edit::Right));
+        app.act(Action::Toggle);
+        let (text, cursor) = screen_and_cursor(&app, 80, 24);
+        assert!(text.contains("▸│ days     ·mon ·tue ✓wed ·thu"), "{text}");
+        assert_eq!(cursor, (22, 5));
+    }
+
+    #[test]
+    fn a_text_longer_than_its_room_shows_where_the_cursor_is() {
+        let mut app = creating("x");
+        on(&mut app, Focus::Workdir);
+        let long = format!("~/{}/the-end", "deep/".repeat(30));
+        for c in long.chars() {
+            app.act(Action::Input(Edit::Insert(c)));
+        }
+        let row = |app: &App| {
+            let (text, cursor) = screen_and_cursor(app, MIN.0, MIN.1);
+            let row = text.lines().find(|line| line.contains("workdir")).unwrap();
+            (row.trim_end().to_owned(), cursor)
+        };
+        let (shown, cursor) = row(&app);
+        assert!(shown.ends_with("the-end"), "{shown:?}");
+        assert!(shown.contains("workdir  …"), "{shown:?}");
+        // After the last character, a column short of the edge.
+        assert_eq!(cursor, (MIN.0 - 2, 6));
+
+        // In the middle, both ends say they were cut.
+        for _ in 0..20 {
+            app.act(Action::Input(Edit::Left));
+        }
+        let (shown, cursor) = row(&app);
+        assert!(
+            shown.contains("workdir  …") && shown.ends_with('…'),
+            "{shown:?}"
+        );
+        assert!(cursor.0 < MIN.0 - 2);
+
+        // From the start of the field, the start is what shows.
+        app.act(Action::Input(Edit::Home));
+        let (shown, cursor) = row(&app);
+        assert!(
+            shown.contains("workdir  ~/deep/") && shown.ends_with('…'),
+            "{shown:?}"
+        );
+        assert_eq!(cursor, (12, 6));
+    }
+
+    #[test]
+    fn the_form_says_what_saving_would_run_into() {
+        let mut app = creating("nightly");
+        on(&mut app, Focus::Agent);
+        app.show_warnings(vec![
+            "workdir not found".to_owned(),
+            "codex not found in PATH".to_owned(),
+        ]);
+        let text = screen(&app, MIN.0, MIN.1);
+        assert!(
+            text.contains(" note: workdir not found; codex not found in PATH"),
+            "{text}"
+        );
+        // On the arguments, what they are for is never out of sight.
+        on(&mut app, Focus::Args);
+        let text = screen(&app, 80, 24);
+        assert!(text.contains("▸│ args"));
+        assert!(text.contains("a scheduled run has nobody to answer a permission prompt"));
+        // Why it could not be saved comes before both, and stays.
+        app.act(Action::Save);
+        app.act(Action::NextField);
+        let text = screen(&app, 80, 24);
+        assert!(!text.contains("nobody to answer"));
+        assert!(text.contains(" workdir is empty"), "{text}");
+    }
+
+    #[test]
+    fn a_field_says_what_it_calls_for() {
+        let mut app = creating("");
+        let notice = |app: &App| {
+            let text = screen(app, MIN.0, MIN.1);
+            text.lines().nth(10).unwrap().trim_end().to_owned()
+        };
+        assert_eq!(notice(&app), " lowercase letters, digits and dashes");
+        on(&mut app, Focus::At);
+        assert_eq!(notice(&app), " 24-hour time, as in 16:05");
+        on(&mut app, Focus::Days);
+        assert_eq!(notice(&app), " no day marked runs every day");
+        on(&mut app, Focus::Agent);
+        assert_eq!(notice(&app), "");
+    }
+
+    #[test]
+    fn arguments_the_field_cannot_hold_are_said_to_be_by_hand() {
+        let text = "[jobs.a]\nagent = \"claude\"\nprompt = \"a.md\"\nworkdir = \".\"\nschedule = { at = \"07:00\" }\nargs = [\"-p\", \" padded \"]\n";
+        let mut app = app(vec![job("a")]);
+        app.open_form(Ok(text.to_owned()), Some("a"));
+        on(&mut app, Focus::Args);
+        let shown = screen(&app, MIN.0, MIN.1);
+        assert!(
+            shown.contains("▸│ args     written by hand in the jobs file"),
+            "{shown}"
+        );
+        assert!(shown.contains(" these arguments can only be changed in the jobs file"));
+        // A key that would do nothing there is not offered.
+        assert!(
+            shown.contains(" tab next  ctrl-s save  esc cancel"),
+            "{shown}"
+        );
+        assert!(!shown.contains("padded"));
+    }
+
+    #[test]
+    fn the_questions_of_the_form_name_what_each_answer_does() {
+        let mut app = creating("nightly");
+        app.act(Action::Back);
+        let (text, cursor) = screen_and_cursor(&app, 80, 24);
+        assert!(text.contains(" discard the changes?  y discard  n keep editing"));
+        // No cursor in a field while a question waits.
+        assert_ne!(cursor, (19, 2));
+
+        let mut list = self::app(vec![job("report")]);
+        list.act(Action::Delete);
+        assert!(screen(&list, 80, 24).contains(" delete report?  y delete  n keep"));
+    }
+
+    #[test]
+    fn the_job_list_offers_to_create_edit_and_delete() {
+        let empty = screen(&app(Vec::new()), 80, 24);
+        assert_eq!(
+            empty.lines().last().unwrap().trim_end(),
+            " n new  ? help  q quit"
+        );
+
+        let wide = screen(&app(vec![job("report")]), 100, 24);
+        let bar = wide.lines().last().unwrap();
+        for key in ["n new", "E edit", "d delete"] {
+            assert!(bar.contains(key), "{key:?} is missing from {bar:?}");
+        }
     }
 
     #[test]

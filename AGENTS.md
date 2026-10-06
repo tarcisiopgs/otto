@@ -43,6 +43,7 @@ src/tui/mod.rs            the terminal UI: takes the terminal, runs the event lo
 src/tui/app.rs            App: the state of the UI; actions in, effects out
 src/tui/view.rs           draws the state; the look is in DESIGN.md
 src/tui/keys.rs           which key asks for which action
+src/tui/form.rs           the form that creates and edits a job: its fields and the jobs file that would result
 src/tui/text.rs           fits text to the columns of a terminal: width, cut, wrap
 src/tui/world.rs          World: everything the UI reads from disk or asks of a process
 src/scheduler/mod.rs      Scheduler trait, Unit, Context, native() picks the backend for this OS
@@ -78,6 +79,8 @@ Do not create a release or publish to npm unless the user asks for it in that co
 - Backends return file contents as data (`Unit`), so they are tested without touching the real scheduler.
 - A backend runs `launchctl` or `systemctl` only through `Runner`, and takes its units directory as a field. Tests use `Recorder` and a temporary directory; no test loads a real unit.
 - The units directory is the only record of what is scheduled. otto keeps no list of its own; a unit with otto's prefix is an otto job.
+- The job form has no validation of its own. Why a job cannot be saved is the error `jobs_file` gives for the text the form would write, which is the error reading the file would give.
+- The form never fills in or suggests an agent argument. What an agent may do is written by the user.
 - Only `src/jobs_file.rs` writes `jobs.toml`. It is the user's file: a change touches the keys that changed and keeps every comment, the order and the line endings. What it would write is checked with `Config::parse` first, and it refuses to write over a file that changed on disk since it was read.
 - Only `src/store.rs` knows the layout of the state directory. It takes its root as a parameter, so tests use a temporary directory.
 - Code that needs the time takes it as a parameter (`jiff::Timestamp`); only `main.rs` reads the clock.

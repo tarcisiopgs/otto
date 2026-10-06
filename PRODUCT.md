@@ -39,6 +39,7 @@ Built today (v0.3.1):
 - `otto list` (with each job's state and last outcome), `otto plan <job>` (prints the scheduler unit `sync` would write) and `otto run <job>` (with `--dry-run`).
 - Scheduler backends for launchd and systemd behind one trait, and an experimental one for Windows Task Scheduler.
 - A terminal UI, `otto` with no subcommand: every job with its state, its next run, how its last run ended and a strip of marks for its latest runs; one job with its run history; the output of a run, followed while it lasts. From it the user runs a job now, stops a run, pauses, skips, resumes and opens the prompt in their editor. A run started there outlives the screen.
+- A form in the terminal UI that creates and edits a job, and a key that deletes one. It writes `jobs.toml` in place: only the values that changed are touched, so the user's comments and layout stay. The prompt file of a new job is created and opened in the user's editor.
 - When a job runs next, computed by otto from the schedule and the job's state. `otto list` shows it too.
 
 Constraints:
@@ -49,7 +50,7 @@ Constraints:
 
 Not built, and not yet decided in detail:
 
-- Creating, editing and deleting a job from the terminal UI, and reviewing and applying the sync there. Today the jobs file is edited by hand and `otto sync` is a command.
+- Reviewing and applying the sync from the terminal UI. Today `otto sync` is a command, and a job created or changed on the screen is not scheduled until it runs.
 - Notifications when a run starts, finishes, fails or is skipped.
 - Prechecks and a grace window for a missed run.
 
