@@ -6,8 +6,11 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+
+use crate::scheduler::runner::Runner;
 
 /// What the user asked of a job's schedule.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +65,264 @@ impl Store {
         let text = toml::to_string(&state).context("cannot encode the job state")?;
         write_atomic(&self.job_dir(job).join("state.toml"), &text)
     }
+
+    /// Opens the record of a run that is about to start the agent.
+    pub fn begin(&self, job: &str, trigger: Trigger, pid: u32, now: Timestamp) -> Result<Run> {
+        let run = Run {
+            id: self.new_id(job, now),
+            started: now,
+            finished: None,
+            trigger,
+            outcome: Outcome::Running,
+            exit_code: None,
+            pid: Some(pid),
+        };
+        self.write(job, &run)?;
+        Ok(run)
+    }
+
+    /// Records a run that did not start the agent, already closed.
+    pub fn record(
+        &self,
+        job: &str,
+        trigger: Trigger,
+        outcome: Outcome,
+        now: Timestamp,
+    ) -> Result<Run> {
+        let run = Run {
+            id: self.new_id(job, now),
+            started: now,
+            finished: Some(now),
+            trigger,
+            outcome,
+            exit_code: None,
+            pid: None,
+        };
+        self.write(job, &run)?;
+        Ok(run)
+    }
+
+    /// Closes a run with the agent's exit code (`None` when a signal ended it)
+    /// and drops the records beyond the newest [`KEEP`].
+    pub fn finish(
+        &self,
+        job: &str,
+        run: &Run,
+        exit_code: Option<i32>,
+        now: Timestamp,
+    ) -> Result<Run> {
+        let done = Run {
+            finished: Some(now),
+            outcome: if exit_code == Some(0) {
+                Outcome::Ok
+            } else {
+                Outcome::Failed
+            },
+            exit_code,
+            ..run.clone()
+        };
+        self.write(job, &done)?;
+        self.prune(job)?;
+        Ok(done)
+    }
+
+    /// The job's runs, newest first. An open run whose process is gone is
+    /// closed as interrupted on the way.
+    pub fn runs(&self, job: &str, runner: &dyn Runner, now: Timestamp) -> Result<Vec<Run>> {
+        let dir = self.job_dir(job);
+        let mut runs = Vec::new();
+        for id in self.ids(job)? {
+            let path = dir.join(format!("{id}.toml"));
+            // A record cut short by a crash is not worth losing the listing over.
+            let Some(mut run) = fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| toml::from_str::<Run>(&text).ok())
+            else {
+                continue;
+            };
+            if run.outcome == Outcome::Running && !is_alive(run.pid, runner)? {
+                run.outcome = Outcome::Interrupted;
+                run.finished = Some(now);
+                self.write(job, &run)?;
+            }
+            runs.push(run);
+        }
+        Ok(runs)
+    }
+
+    pub fn is_running(&self, job: &str, runner: &dyn Runner, now: Timestamp) -> Result<bool> {
+        Ok(self
+            .runs(job, runner, now)?
+            .iter()
+            .any(|run| run.outcome == Outcome::Running))
+    }
+
+    /// Where the output of a run is kept.
+    pub fn log_path(&self, job: &str, run_id: &str) -> Result<PathBuf> {
+        if !is_run_id(run_id) {
+            bail!("{run_id:?} is not a run id");
+        }
+        Ok(self.job_dir(job).join(format!("{run_id}.log")))
+    }
+
+    /// The ids with a record on disk, newest first.
+    fn ids(&self, job: &str) -> Result<Vec<String>> {
+        let dir = self.job_dir(job);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", dir.display()));
+            }
+        };
+        let mut ids = Vec::new();
+        for entry in entries {
+            let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
+            let name = entry.file_name();
+            let id = name.to_str().and_then(|name| name.strip_suffix(".toml"));
+            if let Some(id) = id.filter(|id| is_run_id(id)) {
+                ids.push(id.to_owned());
+            }
+        }
+        ids.sort_by(|a, b| b.cmp(a));
+        Ok(ids)
+    }
+
+    /// The start time as an id; a second run in the same second gets a suffix.
+    fn new_id(&self, job: &str, now: Timestamp) -> String {
+        let base = now.strftime("%Y%m%dT%H%M%SZ").to_string();
+        let dir = self.job_dir(job);
+        let mut id = base.clone();
+        let mut next = 2;
+        while dir.join(format!("{id}.toml")).exists() {
+            id = format!("{base}-{next}");
+            next += 1;
+        }
+        id
+    }
+
+    fn write(&self, job: &str, run: &Run) -> Result<()> {
+        let text = toml::to_string(run).context("cannot encode the run record")?;
+        write_atomic(&self.job_dir(job).join(format!("{}.toml", run.id)), &text)
+    }
+
+    fn prune(&self, job: &str) -> Result<()> {
+        let dir = self.job_dir(job);
+        for id in self.ids(job)?.iter().skip(KEEP) {
+            for extension in ["toml", "log"] {
+                let path = dir.join(format!("{id}.{extension}"));
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("cannot remove {}", path.display()));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// How many runs of a job are remembered.
+pub const KEEP: usize = 50;
+
+/// What started a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Trigger {
+    Scheduled,
+    Manual,
+}
+
+impl Trigger {
+    pub fn label(self) -> &'static str {
+        match self {
+            Trigger::Scheduled => "scheduled",
+            Trigger::Manual => "manual",
+        }
+    }
+}
+
+/// How a run ended, or that it has not yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Outcome {
+    Running,
+    Ok,
+    Failed,
+    /// A scheduled run that did not start the agent: skip-next, or already running.
+    Skipped,
+    /// A scheduled run that did not start the agent because the job is paused.
+    Paused,
+    /// The record was left open and its process is gone.
+    Interrupted,
+}
+
+impl Outcome {
+    pub fn label(self) -> &'static str {
+        match self {
+            Outcome::Running => "running",
+            Outcome::Ok => "ok",
+            Outcome::Failed => "failed",
+            Outcome::Skipped => "skipped",
+            Outcome::Paused => "paused",
+            Outcome::Interrupted => "interrupted",
+        }
+    }
+}
+
+/// One run of a job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Run {
+    /// The start time in UTC, `YYYYMMDDTHHMMSSZ`: ids sort in time order.
+    pub id: String,
+    pub started: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<Timestamp>,
+    pub trigger: Trigger,
+    pub outcome: Outcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// The otto process that owns the run, while it lasts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+}
+
+impl Run {
+    /// Seconds from start to finish; `None` while it runs.
+    pub fn seconds(&self) -> Option<i64> {
+        self.finished
+            .map(|finished| finished.duration_since(self.started).as_secs())
+    }
+}
+
+/// `9s`, `2m 14s`, `1h 02m`.
+pub fn duration_label(seconds: i64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60)
+    }
+}
+
+/// Digits, `T`, `Z` and `-`: a run id never names a path.
+fn is_run_id(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'T' | 'Z' | '-'))
+}
+
+/// Whether the process that owns a run is still there.
+fn is_alive(pid: Option<u32>, runner: &dyn Runner) -> Result<bool> {
+    match pid {
+        Some(pid) => Ok(runner.run("kill", &["-0", &pid.to_string()])?.success),
+        None => Ok(false),
+    }
 }
 
 /// Writes through a temporary file in the same directory, so a crash leaves
@@ -81,11 +342,252 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::scheduler::runner::Recorder;
 
     fn store() -> (TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().to_path_buf());
         (dir, store)
+    }
+
+    fn at(text: &str) -> Timestamp {
+        text.parse().unwrap()
+    }
+
+    /// Every process the store asks about is still there.
+    fn alive() -> Recorder {
+        Recorder::new()
+    }
+
+    /// Every process the store asks about is gone.
+    fn dead() -> Recorder {
+        Recorder::new().answering("kill -0", &[false])
+    }
+
+    #[test]
+    fn a_run_opens_then_closes_with_its_exit_code() {
+        let (_dir, store) = store();
+        let run = store
+            .begin(
+                "report",
+                Trigger::Scheduled,
+                4242,
+                at("2026-10-05T19:16:26Z"),
+            )
+            .unwrap();
+        assert_eq!(run.id, "20261005T191626Z");
+        assert_eq!(run.outcome, Outcome::Running);
+        assert!(
+            store
+                .is_running("report", &alive(), at("2026-10-05T19:17:00Z"))
+                .unwrap()
+        );
+
+        let done = store
+            .finish("report", &run, Some(3), at("2026-10-05T19:18:40Z"))
+            .unwrap();
+        assert_eq!(done.outcome, Outcome::Failed);
+        assert_eq!(done.exit_code, Some(3));
+        assert_eq!(done.seconds(), Some(134));
+        assert!(
+            !store
+                .is_running("report", &alive(), at("2026-10-05T19:19:00Z"))
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .runs("report", &alive(), at("2026-10-05T19:19:00Z"))
+                .unwrap(),
+            [done]
+        );
+    }
+
+    #[test]
+    fn exit_zero_is_ok_and_a_signal_is_failed() {
+        let (_dir, store) = store();
+        let first = store
+            .begin("report", Trigger::Manual, 1, at("2026-10-05T19:00:00Z"))
+            .unwrap();
+        let ok = store
+            .finish("report", &first, Some(0), at("2026-10-05T19:00:05Z"))
+            .unwrap();
+        assert_eq!(ok.outcome, Outcome::Ok);
+
+        let second = store
+            .begin("report", Trigger::Manual, 1, at("2026-10-05T19:01:00Z"))
+            .unwrap();
+        let killed = store
+            .finish("report", &second, None, at("2026-10-05T19:01:05Z"))
+            .unwrap();
+        assert_eq!(killed.outcome, Outcome::Failed);
+        assert_eq!(killed.exit_code, None);
+    }
+
+    #[test]
+    fn the_liveness_check_asks_for_the_recorded_pid() {
+        let (_dir, store) = store();
+        store
+            .begin("report", Trigger::Manual, 4242, at("2026-10-05T19:00:00Z"))
+            .unwrap();
+        let runner = alive();
+        store
+            .is_running("report", &runner, at("2026-10-05T19:00:01Z"))
+            .unwrap();
+        assert_eq!(runner.calls(), ["kill -0 4242"]);
+    }
+
+    #[test]
+    fn an_open_run_whose_process_is_gone_becomes_interrupted() {
+        let (_dir, store) = store();
+        store
+            .begin(
+                "report",
+                Trigger::Scheduled,
+                4242,
+                at("2026-10-05T19:00:00Z"),
+            )
+            .unwrap();
+
+        let later = at("2026-10-05T20:00:00Z");
+        let runs = store.runs("report", &dead(), later).unwrap();
+        assert_eq!(runs[0].outcome, Outcome::Interrupted);
+        assert_eq!(runs[0].finished, Some(later));
+
+        // It stays closed: a later read does not need the process check to agree.
+        let again = store.runs("report", &alive(), later).unwrap();
+        assert_eq!(again[0].outcome, Outcome::Interrupted);
+        assert!(!store.is_running("report", &alive(), later).unwrap());
+    }
+
+    #[test]
+    fn a_skipped_run_is_recorded_already_closed() {
+        let (_dir, store) = store();
+        let run = store
+            .record(
+                "report",
+                Trigger::Scheduled,
+                Outcome::Skipped,
+                at("2026-10-05T19:16:26Z"),
+            )
+            .unwrap();
+        assert_eq!(run.finished, Some(run.started));
+        assert_eq!(run.pid, None);
+        assert!(!store.is_running("report", &alive(), run.started).unwrap());
+    }
+
+    #[test]
+    fn two_runs_in_the_same_second_do_not_overwrite_each_other() {
+        let (_dir, store) = store();
+        let now = at("2026-10-05T19:16:26Z");
+        let skipped = store
+            .record("report", Trigger::Scheduled, Outcome::Skipped, now)
+            .unwrap();
+        let manual = store.begin("report", Trigger::Manual, 7, now).unwrap();
+        assert_eq!(skipped.id, "20261005T191626Z");
+        assert_eq!(manual.id, "20261005T191626Z-2");
+        assert_eq!(store.runs("report", &alive(), now).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn runs_come_newest_first() {
+        let (_dir, store) = store();
+        for minute in ["19:00", "19:02", "19:01"] {
+            store
+                .record(
+                    "report",
+                    Trigger::Scheduled,
+                    Outcome::Paused,
+                    at(&format!("2026-10-05T{minute}:00Z")),
+                )
+                .unwrap();
+        }
+        let ids: Vec<String> = store
+            .runs("report", &alive(), at("2026-10-05T20:00:00Z"))
+            .unwrap()
+            .into_iter()
+            .map(|run| run.id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["20261005T190200Z", "20261005T190100Z", "20261005T190000Z"]
+        );
+    }
+
+    #[test]
+    fn only_the_newest_fifty_runs_are_kept() {
+        let (dir, store) = store();
+        let start = at("2026-10-05T00:00:00Z");
+        let mut ids = Vec::new();
+        for minute in 0..51 {
+            let now = start + jiff::SignedDuration::from_mins(minute);
+            let run = store.begin("report", Trigger::Scheduled, 1, now).unwrap();
+            fs::write(store.log_path("report", &run.id).unwrap(), "output").unwrap();
+            store.finish("report", &run, Some(0), now).unwrap();
+            ids.push(run.id);
+        }
+
+        let runs = store
+            .runs("report", &alive(), at("2026-10-05T02:00:00Z"))
+            .unwrap();
+        assert_eq!(runs.len(), KEEP);
+        let job = dir.path().join("report");
+        assert!(!job.join(format!("{}.toml", ids[0])).exists());
+        assert!(!job.join(format!("{}.log", ids[0])).exists());
+        assert!(job.join(format!("{}.toml", ids[50])).exists());
+        assert!(job.join(format!("{}.log", ids[50])).exists());
+    }
+
+    #[test]
+    fn a_corrupt_record_is_left_out_of_the_listing() {
+        let (dir, store) = store();
+        let good = store
+            .record(
+                "report",
+                Trigger::Scheduled,
+                Outcome::Skipped,
+                at("2026-10-05T19:00:00Z"),
+            )
+            .unwrap();
+        fs::write(
+            dir.path().join("report/20261005T180000Z.toml"),
+            "not toml [",
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .runs("report", &alive(), at("2026-10-05T20:00:00Z"))
+                .unwrap(),
+            [good]
+        );
+    }
+
+    #[test]
+    fn a_job_that_never_ran_has_no_runs() {
+        let (_dir, store) = store();
+        assert!(
+            store
+                .runs("report", &alive(), at("2026-10-05T19:00:00Z"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn log_path_refuses_anything_that_is_not_a_run_id() {
+        let (dir, store) = store();
+        assert_eq!(
+            store.log_path("report", "20261005T191626Z-2").unwrap(),
+            dir.path().join("report/20261005T191626Z-2.log")
+        );
+        assert!(store.log_path("report", "../../etc/passwd").is_err());
+        assert!(store.log_path("report", "").is_err());
+    }
+
+    #[test]
+    fn durations_read_like_a_person_wrote_them() {
+        assert_eq!(duration_label(9), "9s");
+        assert_eq!(duration_label(134), "2m 14s");
+        assert_eq!(duration_label(3720), "1h 02m");
     }
 
     #[test]
