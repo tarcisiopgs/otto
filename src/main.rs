@@ -6,6 +6,7 @@ mod run;
 mod scheduler;
 mod store;
 mod sync;
+mod tui;
 mod which;
 
 use std::env;
@@ -23,7 +24,7 @@ use config::Config;
 use next::Next;
 use run::Request;
 use scheduler::runner::System;
-use store::{Outcome, Run, State, Store, Trigger, duration_label};
+use store::{Run, State, Store, Trigger};
 
 #[derive(Parser)]
 #[command(
@@ -316,20 +317,12 @@ fn run_line(run: &Run, zone: &TimeZone) -> String {
         .started
         .to_zoned(zone.clone())
         .strftime("%Y-%m-%d %H:%M");
-    let outcome = match (run.outcome, run.exit_code) {
-        (Outcome::Failed, Some(code)) => format!("failed ({code})"),
-        (outcome, _) => outcome.label().to_owned(),
-    };
-    // A run that did not start the agent, or has not ended, has no duration.
-    let duration = match run.outcome {
-        Outcome::Running | Outcome::Skipped | Outcome::Paused => None,
-        _ => run.seconds(),
-    };
     format!(
-        "{}\t{started}\t{}\t{outcome}\t{}",
+        "{}\t{started}\t{}\t{}\t{}",
         run.id,
         run.trigger.label(),
-        duration.map_or_else(|| "-".to_owned(), duration_label)
+        run.outcome_label(),
+        run.duration_label().unwrap_or_else(|| "-".to_owned())
     )
 }
 
