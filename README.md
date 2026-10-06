@@ -8,6 +8,16 @@ The name comes from Otto, the school bus driver: he shows up on schedule. It als
 
 > **Status: early.** Jobs are scheduled for real with `otto sync`, and every run is recorded. Notifications and the terminal UI are not built yet. See [Roadmap](#roadmap).
 
+## Install
+
+```sh
+npm install -g @tarcisiopgs/otto
+```
+
+The package carries a native binary for macOS and Linux, on arm64 and x64; the command is `otto`. Node is only used to start it.
+
+A scheduled job calls the native binary by its full path, inside the folder npm installed the package in. That path changes when you upgrade otto through a Node version manager or switch Node versions, so run `otto sync` after either.
+
 ## A job
 
 `~/.config/otto/jobs.toml`:
@@ -72,7 +82,7 @@ Pause and skip need the unit `otto sync` writes today. After upgrading otto, run
 
 otto keeps the newest 50 runs of each job, in `~/.local/state/otto/jobs/<job>/` (`$XDG_STATE_HOME/otto/jobs` when that is set): a small file per run and its output beside it. Removing a job from the jobs file keeps its history. What otto itself prints during a scheduled run, such as a prompt file it could not read, goes to `~/.local/state/otto/logs/<job>.log`.
 
-## Build
+## Build from source
 
 ```sh
 cargo build --release

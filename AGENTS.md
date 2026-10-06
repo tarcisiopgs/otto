@@ -38,7 +38,18 @@ src/scheduler/runner.rs   Runner: how a backend runs launchctl/systemctl; Record
 src/scheduler/launchd.rs  macOS LaunchAgent plist
 src/scheduler/systemd.rs  Linux user service + timer
 examples/                 a jobs.toml and a prompt to start from
+npm/otto/                 the npm package: package.json and the launcher that starts the native binary
 ```
+
+## Releases
+
+The version lives in `Cargo.toml`; the tag is `vMAJOR.MINOR.PATCH` and must match it. A release is `gh release create vX.Y.Z --generate-notes`: never write the notes by hand.
+
+Publishing the GitHub Release runs `.github/workflows/release.yml`, which builds the macOS and Linux binaries, attaches them to the release and publishes `@tarcisiopgs/otto` to npm through trusted publishing (OIDC). No npm token is stored anywhere. npm trusts that workflow by its file name, so renaming it breaks publishing.
+
+One npm package carries every platform's binary, in `bin/<os>-<arch>/otto`. Do not split it into a package per platform: trusted publishing cannot create a package name, and each new name needs a manual bootstrap.
+
+Do not create a release or publish to npm unless the user asks for it in that conversation.
 
 ## Rules
 
