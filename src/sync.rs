@@ -381,8 +381,8 @@ mod tests {
     #[test]
     fn a_job_that_fails_preflight_does_not_stop_the_others() {
         let world = World::new();
-        let text = job("a", "claude", "missing.md", "09:00")
-            + &job("b", "claude", "prompt.md", "09:00");
+        let text =
+            job("a", "claude", "missing.md", "09:00") + &job("b", "claude", "prompt.md", "09:00");
 
         let outcome = world.sync(&text, false);
 

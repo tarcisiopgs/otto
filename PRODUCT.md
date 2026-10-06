@@ -33,7 +33,8 @@ The agent runs on the user's machine with the user's credentials, tools and memo
 Built today (v0.1.0):
 
 - `~/.config/otto/jobs.toml` describes jobs: agent, prompt file, working directory, schedule (`at` and optional `days`), extra agent arguments.
-- `otto list`, `otto plan <job>` (prints the scheduler unit without installing it) and `otto run <job>` (with `--dry-run`).
+- `otto sync` makes the scheduler match the jobs file: it adds, reloads and removes otto's units, and `--dry-run` only reports. Each unit carries the `PATH` of the terminal `sync` ran from and appends the run's output to one log file per job.
+- `otto list`, `otto plan <job>` (prints the scheduler unit `sync` would write) and `otto run <job>` (with `--dry-run`).
 - Scheduler backends for launchd and systemd behind one trait. Windows Task Scheduler is planned.
 
 Constraints:
@@ -42,13 +43,10 @@ Constraints:
 - otto never adds a permission-bypassing flag to an agent command. What an agent may do comes from the job, written by the user.
 - macOS and Linux. No daemon of otto's own.
 
-Measured on 2026-10-05, on the maintainer's Mac: a job installed from the unit `otto plan` prints only ran after a `PATH` and a log file were added by hand. launchd's own `PATH` was empty, so neither `claude` nor `codex` was found, and the unit kept no output.
-
 Not built, and not yet decided in detail:
 
 - The terminal UI itself.
-- Installing and removing units (`otto install` / `otto uninstall`).
-- Run records: when each job ran, how it ended, its output.
+- Run records: when each job ran, how it ended, its output per run. Today a job has one log file that every run appends to.
 - Notifications when a run starts, finishes, fails or is skipped.
 - What "skip" means exactly (the next run only, or until resumed), and whether pausing is a separate action.
 - Prechecks and a grace window for a missed run.
@@ -63,7 +61,7 @@ otto has its own identity. Lisa, the maintainer's other terminal tool, is a refe
 
 - No terminal UI exists and there are no screenshots or recordings. Do not present one as if it existed.
 - `examples/jobs.toml` and `examples/prompts/linear-updates.md` are the shipped example.
-- An end-to-end test on 2026-10-05 ran one Claude Code job and one Codex job through launchd; both exited 0 and wrote the expected file.
+- An end-to-end test on 2026-10-05 ran one Claude Code job and one Codex job through launchd; both exited 0 and wrote the expected file. That test used hand-installed units, before `otto sync` existed; `otto sync` itself has not been run for real against launchd or systemd.
 - Memory use of otto has not been measured.
 
 ## Product Principles

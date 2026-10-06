@@ -31,7 +31,6 @@ impl Systemd {
     fn service(job_name: &str) -> String {
         format!("{PREFIX}{job_name}.service")
     }
-
 }
 
 impl Scheduler for Systemd {
