@@ -37,11 +37,22 @@ impl State {
 /// The state directory, one folder per job.
 pub struct Store {
     root: PathBuf,
+    /// Where the kernel lists running processes, on systems that have it.
+    procfs: Option<PathBuf>,
 }
 
 impl Store {
     pub fn new(root: PathBuf) -> Store {
-        Store { root }
+        Store { root, procfs: None }
+    }
+
+    /// Asks this directory whether a process exists (`<procfs>/<pid>`) instead
+    /// of running `kill`, which a minimal system may not have.
+    pub fn with_procfs(self, procfs: PathBuf) -> Store {
+        Store {
+            procfs: Some(procfs),
+            ..self
+        }
     }
 
     fn job_dir(&self, job: &str) -> PathBuf {
@@ -99,6 +110,8 @@ impl Store {
             pid: None,
         };
         self.write(job, &run)?;
+        // A paused job writes one of these at every fire: keep them bounded.
+        self.prune(job)?;
         Ok(run)
     }
 
@@ -134,16 +147,21 @@ impl Store {
         for id in self.ids(job)? {
             let path = dir.join(format!("{id}.toml"));
             // A record cut short by a crash is not worth losing the listing over.
-            let Some(mut run) = fs::read_to_string(&path)
-                .ok()
-                .and_then(|text| toml::from_str::<Run>(&text).ok())
-            else {
+            let Some(mut run) = read_run(&path) else {
                 continue;
             };
-            if run.outcome == Outcome::Running && !is_alive(run.pid, runner)? {
-                run.outcome = Outcome::Interrupted;
-                run.finished = Some(now);
-                self.write(job, &run)?;
+            if run.outcome == Outcome::Running && !self.is_alive(run.pid, runner) {
+                // The run may have closed its own record while the process was
+                // being checked: read it again before calling it interrupted.
+                // A process that is gone writes nothing more, so this settles it.
+                match read_run(&path) {
+                    Some(current) if current.outcome != Outcome::Running => run = current,
+                    _ => {
+                        run.outcome = Outcome::Interrupted;
+                        run.finished = Some(now);
+                        self.write(job, &run)?;
+                    }
+                }
             }
             runs.push(run);
         }
@@ -163,6 +181,22 @@ impl Store {
             bail!("{run_id:?} is not a run id");
         }
         Ok(self.job_dir(job).join(format!("{run_id}.log")))
+    }
+
+    /// Whether the process that owns a run is still there. When nothing can
+    /// answer, the run counts as alive: calling a live run interrupted loses
+    /// its outcome, calling a dead one alive only delays the correction.
+    fn is_alive(&self, pid: Option<u32>, runner: &dyn Runner) -> bool {
+        let Some(pid) = pid else {
+            return false;
+        };
+        let pid = pid.to_string();
+        match &self.procfs {
+            Some(procfs) => procfs.join(&pid).exists(),
+            None => runner
+                .run("kill", &["-0", &pid])
+                .map_or(true, |output| output.success),
+        }
     }
 
     /// The ids with a record on disk, newest first.
@@ -317,12 +351,10 @@ fn is_run_id(text: &str) -> bool {
             .all(|c| c.is_ascii_digit() || matches!(c, 'T' | 'Z' | '-'))
 }
 
-/// Whether the process that owns a run is still there.
-fn is_alive(pid: Option<u32>, runner: &dyn Runner) -> Result<bool> {
-    match pid {
-        Some(pid) => Ok(runner.run("kill", &["-0", &pid.to_string()])?.success),
-        None => Ok(false),
-    }
+/// A record that cannot be read or understood is `None`.
+fn read_run(path: &Path) -> Option<Run> {
+    let text = fs::read_to_string(path).ok()?;
+    toml::from_str(&text).ok()
 }
 
 /// Writes through a temporary file in the same directory, so a crash leaves
@@ -342,7 +374,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::scheduler::runner::Recorder;
+    use crate::scheduler::runner::{Output, Recorder};
 
     fn store() -> (TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -581,6 +613,106 @@ mod tests {
         );
         assert!(store.log_path("report", "../../etc/passwd").is_err());
         assert!(store.log_path("report", "").is_err());
+    }
+
+    /// A process check during which the run finishes: the check comes back
+    /// "gone" for a run that has just closed its own record.
+    struct FinishesMeanwhile<'a> {
+        store: &'a Store,
+        run: &'a Run,
+    }
+
+    impl Runner for FinishesMeanwhile<'_> {
+        fn run(&self, _program: &str, _args: &[&str]) -> Result<Output> {
+            self.store
+                .finish("report", self.run, Some(0), at("2026-10-05T19:05:00Z"))?;
+            Ok(Output {
+                success: false,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn a_run_that_ends_while_being_checked_keeps_its_own_outcome() {
+        let (_dir, store) = store();
+        let run = store
+            .begin("report", Trigger::Scheduled, 4242, at("2026-10-05T19:00:00Z"))
+            .unwrap();
+        let racing = FinishesMeanwhile {
+            store: &store,
+            run: &run,
+        };
+
+        let seen = store
+            .runs("report", &racing, at("2026-10-05T19:05:01Z"))
+            .unwrap();
+
+        assert_eq!(seen[0].outcome, Outcome::Ok);
+        let later = store
+            .runs("report", &alive(), at("2026-10-05T19:06:00Z"))
+            .unwrap();
+        assert_eq!(later[0].outcome, Outcome::Ok);
+    }
+
+    /// A machine without a `kill` program.
+    struct CannotStart;
+
+    impl Runner for CannotStart {
+        fn run(&self, program: &str, _args: &[&str]) -> Result<Output> {
+            bail!("cannot start {program}")
+        }
+    }
+
+    #[test]
+    fn a_process_that_cannot_be_checked_counts_as_running() {
+        let (_dir, store) = store();
+        store
+            .begin("report", Trigger::Scheduled, 4242, at("2026-10-05T19:00:00Z"))
+            .unwrap();
+
+        let runs = store
+            .runs("report", &CannotStart, at("2026-10-05T19:05:00Z"))
+            .unwrap();
+
+        assert_eq!(runs[0].outcome, Outcome::Running);
+    }
+
+    #[test]
+    fn procfs_answers_without_running_a_program() {
+        let (dir, _) = store();
+        let proc_dir = dir.path().join("proc");
+        fs::create_dir_all(proc_dir.join("4242")).unwrap();
+        let store = Store::new(dir.path().join("jobs")).with_procfs(proc_dir);
+        store
+            .begin("here", Trigger::Scheduled, 4242, at("2026-10-05T19:00:00Z"))
+            .unwrap();
+        store
+            .begin("gone", Trigger::Scheduled, 7, at("2026-10-05T19:00:00Z"))
+            .unwrap();
+        let runner = Recorder::new();
+        let now = at("2026-10-05T19:05:00Z");
+
+        assert!(store.is_running("here", &runner, now).unwrap());
+        assert!(!store.is_running("gone", &runner, now).unwrap());
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn runs_that_did_not_start_the_agent_are_pruned_too() {
+        let (_dir, store) = store();
+        let start = at("2026-10-05T00:00:00Z");
+        for minute in 0..60 {
+            let now = start + jiff::SignedDuration::from_mins(minute);
+            store
+                .record("report", Trigger::Scheduled, Outcome::Paused, now)
+                .unwrap();
+        }
+        let runs = store
+            .runs("report", &alive(), at("2026-10-05T02:00:00Z"))
+            .unwrap();
+        assert_eq!(runs.len(), KEEP);
     }
 
     #[test]
