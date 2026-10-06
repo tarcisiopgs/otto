@@ -2,6 +2,7 @@
 //! own: it writes the unit the OS scheduler understands and lets it wake `otto run`.
 
 mod launchd;
+pub mod runner;
 mod systemd;
 
 use std::path::{Path, PathBuf};
