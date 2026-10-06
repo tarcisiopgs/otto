@@ -33,6 +33,8 @@ src/main.rs               CLI (clap): list, sync, plan, run, skip, pause, resume
 src/store.rs              Store: per-job state (paused, skip next) and run records under the state directory
 src/run.rs                one run of a job: pause/skip/busy, start the agent, keep its output, close the record
 src/config.rs             jobs.toml: Config, Job, Schedule, Weekday; parsing, validation, path resolution
+src/jobs_file.rs          writes jobs.toml: add, change and remove a job without disturbing the rest of the file
+src/atomic.rs             writes a file so that a crash leaves the old content or the new one
 src/agent.rs              Agent: the argv of a non-interactive run of each agent CLI
 src/sync.rs               sync: compares the jobs file with the units on disk and applies the difference
 src/next.rs               when a job runs next, from its schedule and state
@@ -76,6 +78,7 @@ Do not create a release or publish to npm unless the user asks for it in that co
 - Backends return file contents as data (`Unit`), so they are tested without touching the real scheduler.
 - A backend runs `launchctl` or `systemctl` only through `Runner`, and takes its units directory as a field. Tests use `Recorder` and a temporary directory; no test loads a real unit.
 - The units directory is the only record of what is scheduled. otto keeps no list of its own; a unit with otto's prefix is an otto job.
+- Only `src/jobs_file.rs` writes `jobs.toml`. It is the user's file: a change touches the keys that changed and keeps every comment, the order and the line endings. What it would write is checked with `Config::parse` first, and it refuses to write over a file that changed on disk since it was read.
 - Only `src/store.rs` knows the layout of the state directory. It takes its root as a parameter, so tests use a temporary directory.
 - Code that needs the time takes it as a parameter (`jiff::Timestamp`); only `main.rs` reads the clock.
 - Tests never start a real agent. `run::execute` takes the command ready to start, and tests give it `sh -c`.
