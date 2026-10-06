@@ -97,7 +97,7 @@ fn start(request: &Request, argv: &[String], log: &Path) -> Result<ExitStatus> {
         bail!("working directory not found: {}", request.workdir.display());
     }
     let file = File::create(log).with_context(|| format!("cannot write {}", log.display()))?;
-    let mut command = Command::new(program);
+    let mut command = command_for(program);
     // No terminal is attached on a scheduled run, so the agent gets no stdin.
     command
         .args(args)
@@ -155,6 +155,26 @@ fn start(request: &Request, argv: &[String], log: &Path) -> Result<ExitStatus> {
     Ok(status)
 }
 
+/// The command that starts `program`. Windows only finds a bare name when the
+/// file is an `.exe`, and an agent CLI is often a `.cmd`, so the file is
+/// looked up here first. A name that is not found is left to the system,
+/// which reports it.
+#[cfg(windows)]
+fn command_for(program: &str) -> Command {
+    let found = std::env::var_os("PATH").and_then(|path| crate::which::find(program, &path));
+    match found {
+        Some(file) => Command::new(file),
+        None => Command::new(program),
+    }
+}
+
+/// Everywhere else the system's own lookup is the one to trust: it runs after
+/// the working directory changes and skips a file it may not execute.
+#[cfg(not(windows))]
+fn command_for(program: &str) -> Command {
+    Command::new(program)
+}
+
 /// How long a manual run waits for its output to drain after the agent exits.
 const DRAIN: Duration = Duration::from_millis(500);
 
@@ -176,7 +196,9 @@ fn tee(mut from: impl Read, mut terminal: impl Write, log: &Path) {
     }
 }
 
+// These tests start `sh` in the place of the agent.
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use std::fs;
     use std::path::PathBuf;

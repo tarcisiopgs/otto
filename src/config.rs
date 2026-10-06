@@ -80,6 +80,19 @@ impl Weekday {
             Weekday::Sun => "Sun",
         }
     }
+
+    /// The element Task Scheduler names the day with.
+    pub fn windows_name(self) -> &'static str {
+        match self {
+            Weekday::Mon => "Monday",
+            Weekday::Tue => "Tuesday",
+            Weekday::Wed => "Wednesday",
+            Weekday::Thu => "Thursday",
+            Weekday::Fri => "Friday",
+            Weekday::Sat => "Saturday",
+            Weekday::Sun => "Sunday",
+        }
+    }
 }
 
 impl Schedule {

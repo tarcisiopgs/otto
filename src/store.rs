@@ -37,20 +37,40 @@ impl State {
 /// The state directory, one folder per job.
 pub struct Store {
     root: PathBuf,
-    /// Where the kernel lists running processes, on systems that have it.
-    procfs: Option<PathBuf>,
+    liveness: Liveness,
+}
+
+/// How to learn whether a process still exists.
+enum Liveness {
+    /// `kill -0 <pid>`, on any Unix.
+    Kill,
+    /// `<dir>/<pid>` exists, where the kernel lists processes there.
+    Procfs(PathBuf),
+    /// `tasklist`, on Windows.
+    Tasklist,
 }
 
 impl Store {
     pub fn new(root: PathBuf) -> Store {
-        Store { root, procfs: None }
+        Store {
+            root,
+            liveness: Liveness::Kill,
+        }
     }
 
     /// Asks this directory whether a process exists (`<procfs>/<pid>`) instead
     /// of running `kill`, which a minimal system may not have.
     pub fn with_procfs(self, procfs: PathBuf) -> Store {
         Store {
-            procfs: Some(procfs),
+            liveness: Liveness::Procfs(procfs),
+            ..self
+        }
+    }
+
+    /// Asks `tasklist` whether a process exists: Windows has no `kill`.
+    pub fn with_tasklist(self) -> Store {
+        Store {
+            liveness: Liveness::Tasklist,
             ..self
         }
     }
@@ -197,11 +217,21 @@ impl Store {
             return false;
         };
         let pid = pid.to_string();
-        match &self.procfs {
-            Some(procfs) => procfs.join(&pid).exists(),
-            None => runner
+        match &self.liveness {
+            Liveness::Procfs(procfs) => procfs.join(&pid).exists(),
+            Liveness::Kill => runner
                 .run("kill", &["-0", &pid])
                 .map_or(true, |output| output.success),
+            // One CSV line per match, with the pid quoted; a sentence when
+            // there is none. The exit status is zero either way.
+            Liveness::Tasklist => {
+                let filter = format!("PID eq {pid}");
+                runner
+                    .run("tasklist", &["/FI", &filter, "/FO", "CSV", "/NH"])
+                    .map_or(true, |output| {
+                        !output.success || output.stdout.contains(&format!("\"{pid}\""))
+                    })
+            }
         }
     }
 
@@ -787,6 +817,32 @@ mod tests {
             .unwrap();
 
         assert_eq!(runs[0].outcome, Outcome::Running);
+    }
+
+    #[test]
+    fn tasklist_answers_where_there_is_no_kill() {
+        let (dir, _) = store();
+        let store = Store::new(dir.path().join("jobs")).with_tasklist();
+        store
+            .begin("here", Trigger::Scheduled, 4242, at("2026-10-05T19:00:00Z"))
+            .unwrap();
+        store
+            .begin("gone", Trigger::Scheduled, 7, at("2026-10-05T19:00:00Z"))
+            .unwrap();
+        let runner = Recorder::new()
+            .printing(
+                "tasklist /FI PID eq 4242",
+                "\"otto.exe\",\"4242\",\"Console\",\"1\",\"5,000 K\"\r\n",
+            )
+            .printing(
+                "tasklist /FI PID eq 7",
+                "INFO: No tasks are running which match the specified criteria.\r\n",
+            );
+        let now = at("2026-10-05T19:05:00Z");
+
+        assert!(store.is_running("here", &runner, now).unwrap());
+        assert!(!store.is_running("gone", &runner, now).unwrap());
+        assert_eq!(runner.calls()[0], "tasklist /FI PID eq 4242 /FO CSV /NH");
     }
 
     #[test]

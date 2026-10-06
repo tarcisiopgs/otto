@@ -4,6 +4,7 @@ mod run;
 mod scheduler;
 mod store;
 mod sync;
+mod which;
 
 use std::env;
 use std::fs;
@@ -99,9 +100,12 @@ fn context(config_path: &Path) -> Result<scheduler::Context> {
 /// What otto remembers about each job, under the state directory.
 fn store() -> Result<Store> {
     let store = Store::new(config::state_dir()?.join("jobs"));
-    // Linux lists processes under /proc; elsewhere the store asks `kill`.
+    // Linux lists processes under /proc and Windows has `tasklist`; elsewhere
+    // the store asks `kill`.
     let procfs = Path::new("/proc");
-    Ok(if procfs.join("self").exists() {
+    Ok(if cfg!(windows) {
+        store.with_tasklist()
+    } else if procfs.join("self").exists() {
         store.with_procfs(procfs.to_path_buf())
     } else {
         store

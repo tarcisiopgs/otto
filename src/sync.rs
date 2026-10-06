@@ -1,16 +1,16 @@
 //! Makes the OS scheduler match the jobs file. The units directory is the only
 //! state: what is on disk there is what is scheduled.
 
-use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 
 use crate::config::{Config, Job};
 use crate::scheduler::runner::Runner;
 use crate::scheduler::{Context, Scheduler, Unit};
+use crate::which;
 
 /// What a sync does, or did, to one job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,21 +66,10 @@ pub fn preflight(job: &Job, path: &str) -> Result<()> {
         bail!("working directory not found: {}", job.workdir.display());
     }
     let program = job.agent.program();
-    if !env::split_paths(path).any(|dir| is_executable(&dir.join(program))) {
+    if which::find(program, OsStr::new(path)).is_none() {
         bail!("{program} not found in PATH");
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
 }
 
 fn read_present(units: &[Unit]) -> Result<Vec<Option<String>>> {
@@ -195,7 +184,9 @@ pub fn sync(
     outcomes
 }
 
+// These tests build a machine out of files with execute bits, as a Unix has.
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use std::cell::RefCell;
     use std::os::unix::fs::PermissionsExt;

@@ -5,7 +5,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 
 use super::runner::{Runner, must};
-use super::{Context, PREFIX, Scheduler, Unit, file_names, remove_unit, write_units};
+use super::{
+    Context, PREFIX, Scheduler, Unit, file_names, remove_unit, write_units, xml_escape as escape,
+};
 use crate::config::{Job, home_dir, is_job_name};
 
 /// macOS: one LaunchAgent per job, in the user's GUI session so the agent CLI
@@ -156,13 +158,9 @@ impl Scheduler for Launchd {
     }
 }
 
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
+// The paths these tests compare are written with `/`.
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use std::fs;
     use std::path::Path;

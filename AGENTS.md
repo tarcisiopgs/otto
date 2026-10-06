@@ -20,7 +20,9 @@ cargo run -- --config examples/jobs.toml list
 cargo run -- --config examples/jobs.toml plan linear-updates
 ```
 
-CI (`.github/workflows/ci.yml`) runs Lint, Test (macOS and Linux) and Build for every pull request. The `check` job passes only when all of them pass.
+CI (`.github/workflows/ci.yml`) runs Lint (macOS and Windows), Test (macOS, Linux and Windows), Build (every release target, with the steps `release.yml` uses, since that workflow only runs on a release) and `Windows Task Scheduler` for every pull request. The `check` job passes only when all of them pass.
+
+`Windows Task Scheduler` is the only place the Windows backend really runs: `scripts/windows-smoke.ps1` does a real `otto sync` on the runner, starts the task and reads its record back. There is no Windows machine to try a change on, so a change to `src/scheduler/windows.rs`, `src/which.rs` or how a run starts is not verified until that job passes.
 
 Do not load a unit into launchd or systemd, and do not run a job for real, while testing on a real machine unless the user asks for it in that conversation. That rules out a bare `otto sync`. `otto plan`, `otto sync --dry-run` and `otto run --dry-run` exist for that.
 
@@ -37,6 +39,8 @@ src/scheduler/mod.rs      Scheduler trait, Unit, Context, native() picks the bac
 src/scheduler/runner.rs   Runner: how a backend runs launchctl/systemctl; Recorder fakes it in tests
 src/scheduler/launchd.rs  macOS LaunchAgent plist
 src/scheduler/systemd.rs  Linux user service + timer
+src/scheduler/windows.rs  Windows Task Scheduler task (experimental)
+src/which.rs              finds a program on the PATH, with the extensions Windows adds
 examples/                 a jobs.toml and a prompt to start from
 npm/otto/                 the npm package: package.json and the launcher that starts the native binary
 ```
@@ -45,7 +49,7 @@ npm/otto/                 the npm package: package.json and the launcher that st
 
 The version lives in `Cargo.toml`; the tag is `vMAJOR.MINOR.PATCH` and must match it. A release is `gh release create vX.Y.Z --generate-notes`: never write the notes by hand.
 
-Publishing the GitHub Release runs `.github/workflows/release.yml`, which builds the macOS and Linux binaries, attaches them to the release and publishes `@tarcisiopgs/otto` to npm through trusted publishing (OIDC). No npm token is stored anywhere. npm trusts that workflow by its file name, so renaming it breaks publishing.
+Publishing the GitHub Release runs `.github/workflows/release.yml`, which builds the macOS, Linux and Windows binaries, attaches them to the release and publishes `@tarcisiopgs/otto` to npm through trusted publishing (OIDC). No npm token is stored anywhere. npm trusts that workflow by its file name, so renaming it breaks publishing.
 
 One npm package carries every platform's binary, in `bin/<os>-<arch>/otto`. Do not split it into a package per platform: trusted publishing cannot create a package name, and each new name needs a manual bootstrap.
 
@@ -53,7 +57,7 @@ The same workflow attaches a `.deb` per Linux architecture, built by `scripts/bu
 
 Homebrew lives in another repository, `tarcisiopgs/homebrew-tap` (`brew install tarcisiopgs/tap/otto`). It follows the releases on a schedule with its own token, so this repository stores no secret for it. The formula needs the four `.tar.xz` archives and their `.sha256` files under the names the release gives them: renaming an archive breaks the tap.
 
-There is no Windows package (Scoop, winget) because there is no Windows scheduler backend.
+Windows is experimental. The release attaches a `.zip` per Windows architecture and the npm package carries `otto.exe`. There is no Scoop or winget package yet.
 
 Do not create a release or publish to npm unless the user asks for it in that conversation.
 
@@ -67,6 +71,7 @@ Do not create a release or publish to npm unless the user asks for it in that co
 - Only `src/store.rs` knows the layout of the state directory. It takes its root as a parameter, so tests use a temporary directory.
 - Code that needs the time takes it as a parameter (`jiff::Timestamp`); only `main.rs` reads the clock.
 - Tests never start a real agent. `run::execute` takes the command ready to start, and tests give it `sh -c`.
+- The suite also runs on Windows. A test module that needs a Unix (execute bits, `sh`, paths written with `/`) carries `#[cfg(test)]` and `#[cfg(unix)]` as two attributes: clippy only treats a module as test code when it sees `#[cfg(test)]` on its own.
 - Job names are lowercase letters, digits and dashes: they end up in service labels and file names.
 - No `unwrap` or `expect` outside tests; errors carry context with `anyhow`.
 - Commit messages, branch names and pull requests are written in English. Never push to `main` directly: branch, push, open a pull request.

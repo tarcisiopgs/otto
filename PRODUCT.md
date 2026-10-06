@@ -37,13 +37,13 @@ Built today (v0.1.1):
 - Run records: every run of a job is kept with its start, trigger (scheduled or manual), outcome, duration and output. `otto runs <job>` lists them and `otto log <job>` prints the output. The newest 50 per job are kept.
 - Skip and pause are separate. `otto skip <job>` drops the next scheduled run only; `otto pause <job>` stops scheduled runs until `otto resume <job>`. Both are recorded as runs that did not start the agent. A manual `otto run <job>` always runs and leaves them as they were.
 - `otto list` (with each job's state and last outcome), `otto plan <job>` (prints the scheduler unit `sync` would write) and `otto run <job>` (with `--dry-run`).
-- Scheduler backends for launchd and systemd behind one trait. Windows Task Scheduler is planned.
+- Scheduler backends for launchd and systemd behind one trait, and an experimental one for Windows Task Scheduler.
 
 Constraints:
 
 - otto manages only the jobs it created. Other LaunchAgents and timers on the machine are out of scope and stay invisible.
 - otto never adds a permission-bypassing flag to an agent command. What an agent may do comes from the job, written by the user.
-- macOS and Linux. No daemon of otto's own.
+- macOS and Linux. Windows is experimental: it has only ever run on a CI runner, where a real sync is exercised against Task Scheduler, and never on a machine someone uses. No daemon of otto's own.
 
 Not built, and not yet decided in detail:
 

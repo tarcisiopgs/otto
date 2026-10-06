@@ -53,6 +53,7 @@ impl Runner for System {
 pub struct Recorder {
     calls: std::cell::RefCell<Vec<String>>,
     answers: std::cell::RefCell<Vec<(String, Vec<bool>)>>,
+    printed: std::cell::RefCell<Vec<(String, String)>>,
 }
 
 #[cfg(test)]
@@ -61,7 +62,16 @@ impl Recorder {
         Recorder {
             calls: std::cell::RefCell::new(Vec::new()),
             answers: std::cell::RefCell::new(Vec::new()),
+            printed: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Commands whose line starts with `prefix` print `stdout`.
+    pub fn printing(self, prefix: &str, stdout: &str) -> Recorder {
+        self.printed
+            .borrow_mut()
+            .push((prefix.to_owned(), stdout.to_owned()));
+        self
     }
 
     /// Commands whose line starts with `prefix` answer with `results` in order
@@ -99,11 +109,21 @@ impl Runner for Recorder {
                 }
             })
             .unwrap_or(true);
-        let stdout = if line == "id -u" { "501\n" } else { "" };
+        let printed = self
+            .printed
+            .borrow()
+            .iter()
+            .find(|(prefix, _)| line.starts_with(prefix.as_str()))
+            .map(|(_, stdout)| stdout.clone());
+        let stdout = match printed {
+            Some(stdout) => stdout,
+            None if line == "id -u" => "501\n".to_owned(),
+            None => String::new(),
+        };
         self.calls.borrow_mut().push(line);
         Ok(Output {
             success,
-            stdout: stdout.to_owned(),
+            stdout,
             stderr: String::new(),
         })
     }
@@ -113,6 +133,7 @@ impl Runner for Recorder {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn system_reports_exit_status_and_output() {
         let out = System

@@ -13,7 +13,7 @@
     "otto": "bin/otto.js"
   },
   "files": ["bin"],
-  "os": ["darwin", "linux"],
+  "os": ["darwin", "linux", "win32"],
   "cpu": ["arm64", "x64"],
   "engines": {
     "node": ">=18"
