@@ -33,8 +33,10 @@ The agent runs on the user's machine with the user's credentials, tools and memo
 Built today (v0.1.0):
 
 - `~/.config/otto/jobs.toml` describes jobs: agent, prompt file, working directory, schedule (`at` and optional `days`), extra agent arguments.
-- `otto sync` makes the scheduler match the jobs file: it adds, reloads and removes otto's units, and `--dry-run` only reports. Each unit carries the `PATH` of the terminal `sync` ran from and appends the run's output to one log file per job.
-- `otto list`, `otto plan <job>` (prints the scheduler unit `sync` would write) and `otto run <job>` (with `--dry-run`).
+- `otto sync` makes the scheduler match the jobs file: it adds, reloads and removes otto's units, and `--dry-run` only reports. Each unit carries the `PATH` of the terminal `sync` ran from. A job with a run in progress is reported as `busy` and left alone.
+- Run records: every run of a job is kept with its start, trigger (scheduled or manual), outcome, duration and output. `otto runs <job>` lists them and `otto log <job>` prints the output. The newest 50 per job are kept.
+- Skip and pause are separate. `otto skip <job>` drops the next scheduled run only; `otto pause <job>` stops scheduled runs until `otto resume <job>`. Both are recorded as runs that did not start the agent. A manual `otto run <job>` always runs and leaves them as they were.
+- `otto list` (with each job's state and last outcome), `otto plan <job>` (prints the scheduler unit `sync` would write) and `otto run <job>` (with `--dry-run`).
 - Scheduler backends for launchd and systemd behind one trait. Windows Task Scheduler is planned.
 
 Constraints:
@@ -46,9 +48,8 @@ Constraints:
 Not built, and not yet decided in detail:
 
 - The terminal UI itself.
-- Run records: when each job ran, how it ended, its output per run. Today a job has one log file that every run appends to.
 - Notifications when a run starts, finishes, fails or is skipped.
-- What "skip" means exactly (the next run only, or until resumed), and whether pausing is a separate action.
+- When a job runs next: otto does not compute it yet.
 - Prechecks and a grace window for a missed run.
 
 ## Brand Commitments

@@ -82,10 +82,7 @@ pub fn execute(
 
 /// Starts the agent and waits for it, with its output kept in `log`.
 fn start(request: &Request, log: &Path) -> Result<ExitStatus> {
-    let (program, args) = request
-        .argv
-        .split_first()
-        .context("empty agent command")?;
+    let (program, args) = request.argv.split_first().context("empty agent command")?;
     let file = File::create(log).with_context(|| format!("cannot write {}", log.display()))?;
     let mut command = Command::new(program);
     // No terminal is attached on a scheduled run, so the agent gets no stdin.
@@ -289,11 +286,7 @@ mod tests {
         assert_eq!(world.store.state("report").unwrap(), State::default());
 
         world
-            .run_at(
-                Trigger::Scheduled,
-                &sh("touch ran"),
-                "2026-10-06T19:16:26Z",
-            )
+            .run_at(Trigger::Scheduled, &sh("touch ran"), "2026-10-06T19:16:26Z")
             .unwrap();
         assert_eq!(world.last().outcome, Outcome::Ok);
         assert!(world.ran());

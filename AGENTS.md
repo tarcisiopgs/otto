@@ -27,7 +27,9 @@ Do not load a unit into launchd or systemd, and do not run a job for real, while
 ## Layout
 
 ```
-src/main.rs               CLI (clap): list, sync, plan, run
+src/main.rs               CLI (clap): list, sync, plan, run, skip, pause, resume, runs, log
+src/store.rs              Store: per-job state (paused, skip next) and run records under the state directory
+src/run.rs                one run of a job: pause/skip/busy, start the agent, keep its output, close the record
 src/config.rs             jobs.toml: Config, Job, Schedule, Weekday; parsing, validation, path resolution
 src/agent.rs              Agent: the argv of a non-interactive run of each agent CLI
 src/sync.rs               sync: compares the jobs file with the units on disk and applies the difference
@@ -44,7 +46,10 @@ examples/                 a jobs.toml and a prompt to start from
 - A new agent is a new `Agent` variant with its non-interactive argv. The prompt is always the last argument.
 - Backends return file contents as data (`Unit`), so they are tested without touching the real scheduler.
 - A backend runs `launchctl` or `systemctl` only through `Runner`, and takes its units directory as a field. Tests use `Recorder` and a temporary directory; no test loads a real unit.
-- The units directory is the only state. otto keeps no record of what it scheduled; a unit with otto's prefix is an otto job.
+- The units directory is the only record of what is scheduled. otto keeps no list of its own; a unit with otto's prefix is an otto job.
+- Only `src/store.rs` knows the layout of the state directory. It takes its root as a parameter, so tests use a temporary directory.
+- Code that needs the time takes it as a parameter (`jiff::Timestamp`); only `main.rs` reads the clock.
+- Tests never start a real agent. `run::execute` takes the command ready to start, and tests give it `sh -c`.
 - Job names are lowercase letters, digits and dashes: they end up in service labels and file names.
 - No `unwrap` or `expect` outside tests; errors carry context with `anyhow`.
 - Commit messages, branch names and pull requests are written in English. Never push to `main` directly: branch, push, open a pull request.

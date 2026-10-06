@@ -318,14 +318,14 @@ mod tests {
                 dry_run,
             )
             .into_iter()
-                .map(|outcome| {
-                    let shown = match outcome.result {
-                        Ok(action) => action.label().to_owned(),
-                        Err(error) => format!("error: {error:#}"),
-                    };
-                    (outcome.job, shown)
-                })
-                .collect()
+            .map(|outcome| {
+                let shown = match outcome.result {
+                    Ok(action) => action.label().to_owned(),
+                    Err(error) => format!("error: {error:#}"),
+                };
+                (outcome.job, shown)
+            })
+            .collect()
         }
 
         fn calls(&self) -> Vec<String> {

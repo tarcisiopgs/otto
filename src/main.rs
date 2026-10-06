@@ -7,17 +7,19 @@ mod sync;
 
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use jiff::Timestamp;
+use jiff::tz::TimeZone;
 
 use config::Config;
 use run::Request;
 use scheduler::runner::System;
-use store::{Store, Trigger};
+use store::{Outcome, Run, State, Store, Trigger, duration_label};
 
 #[derive(Parser)]
 #[command(
@@ -56,6 +58,16 @@ enum Cmd {
         #[arg(long, conflicts_with = "dry_run")]
         scheduled: bool,
     },
+    /// Skip the next scheduled run of a job.
+    Skip { job: String },
+    /// Stop the scheduled runs of a job until it is resumed.
+    Pause { job: String },
+    /// Clear pause and skip: the job runs on schedule again.
+    Resume { job: String },
+    /// List the runs of a job, newest first.
+    Runs { job: String },
+    /// Print the output of a run: the latest one, or the one with this id.
+    Log { job: String, run: Option<String> },
 }
 
 fn main() -> ExitCode {
@@ -98,7 +110,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
     match cli.command {
         Cmd::List => {
+            let store = store()?;
+            let now = Timestamp::now();
             for (name, job) in &config.jobs {
+                let last = store
+                    .runs(name, &System, now)?
+                    .first()
+                    .map_or("never", |run| run.outcome.label());
                 let days: Vec<&str> = job
                     .schedule
                     .days
@@ -106,11 +124,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     .map(|day| day.systemd_name())
                     .collect();
                 println!(
-                    "{name}\t{:?}\t{} {}\t{}",
+                    "{name}\t{:?}\t{} {}\t{}\t{}\t{last}",
                     job.agent,
                     job.schedule.at,
                     days.join(","),
-                    job.workdir.display()
+                    job.workdir.display(),
+                    store.state(name)?.label()
                 );
             }
             Ok(ExitCode::SUCCESS)
@@ -189,5 +208,145 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let code = run::execute(&request, &store()?, &System, &Timestamp::now)?;
             Ok(ExitCode::from(code))
         }
+        Cmd::Skip { job: name } => {
+            config.job(&name)?;
+            let store = store()?;
+            let state = State {
+                skip_next: true,
+                ..store.state(&name)?
+            };
+            set_state(&store, &name, state)
+        }
+        Cmd::Pause { job: name } => {
+            config.job(&name)?;
+            let store = store()?;
+            let state = State {
+                paused: true,
+                ..store.state(&name)?
+            };
+            set_state(&store, &name, state)
+        }
+        Cmd::Resume { job: name } => {
+            config.job(&name)?;
+            set_state(&store()?, &name, State::default())
+        }
+        Cmd::Runs { job: name } => {
+            config.job(&name)?;
+            let runs = store()?.runs(&name, &System, Timestamp::now())?;
+            if runs.is_empty() {
+                eprintln!("no runs yet");
+            }
+            let zone = TimeZone::system();
+            for run in &runs {
+                println!("{}", run_line(run, &zone));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Log { job: name, run } => {
+            config.job(&name)?;
+            let store = store()?;
+            let path = match run {
+                Some(id) => {
+                    let path = store.log_path(&name, &id)?;
+                    if !path.is_file() {
+                        bail!("no output for run {id} of {name}");
+                    }
+                    path
+                }
+                // A skipped or paused run has no output: pass over it.
+                None => store
+                    .runs(&name, &System, Timestamp::now())?
+                    .iter()
+                    .filter_map(|run| store.log_path(&name, &run.id).ok())
+                    .find(|path| path.is_file())
+                    .with_context(|| format!("no output recorded for {name}"))?,
+            };
+            // Byte for byte: an agent may print what is not valid UTF-8.
+            let output =
+                fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+            io::stdout()
+                .write_all(&output)
+                .context("cannot write to the terminal")?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn set_state(store: &Store, job: &str, state: State) -> Result<ExitCode> {
+    store.set_state(job, state)?;
+    println!("{job}\t{}", state.label());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// One run as a line of `otto runs`: id, local start, trigger, outcome, duration.
+fn run_line(run: &Run, zone: &TimeZone) -> String {
+    let started = run
+        .started
+        .to_zoned(zone.clone())
+        .strftime("%Y-%m-%d %H:%M");
+    let outcome = match (run.outcome, run.exit_code) {
+        (Outcome::Failed, Some(code)) => format!("failed ({code})"),
+        (outcome, _) => outcome.label().to_owned(),
+    };
+    // A run that did not start the agent, or has not ended, has no duration.
+    let duration = match run.outcome {
+        Outcome::Running | Outcome::Skipped | Outcome::Paused => None,
+        _ => run.seconds(),
+    };
+    format!(
+        "{}\t{started}\t{}\t{outcome}\t{}",
+        run.id,
+        run.trigger.label(),
+        duration.map_or_else(|| "-".to_owned(), duration_label)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Outcome;
+
+    fn a_run(outcome: Outcome, trigger: Trigger, finished: Option<&str>) -> Run {
+        Run {
+            id: "20261005T191626Z".to_owned(),
+            started: "2026-10-05T19:16:26Z".parse().unwrap(),
+            finished: finished.map(|text| text.parse().unwrap()),
+            trigger,
+            outcome,
+            exit_code: None,
+            pid: None,
+        }
+    }
+
+    #[test]
+    fn a_run_line_shows_when_how_and_for_how_long() {
+        let run = Run {
+            exit_code: Some(3),
+            ..a_run(
+                Outcome::Failed,
+                Trigger::Manual,
+                Some("2026-10-05T19:18:40Z"),
+            )
+        };
+        assert_eq!(
+            run_line(&run, &TimeZone::UTC),
+            "20261005T191626Z\t2026-10-05 19:16\tmanual\tfailed (3)\t2m 14s"
+        );
+    }
+
+    #[test]
+    fn a_run_line_has_no_duration_for_a_run_that_did_not_start() {
+        let run = a_run(
+            Outcome::Skipped,
+            Trigger::Scheduled,
+            Some("2026-10-05T19:16:26Z"),
+        );
+        assert!(run_line(&run, &TimeZone::UTC).ends_with("scheduled\tskipped\t-"));
+    }
+
+    #[test]
+    fn a_run_line_has_no_duration_while_running() {
+        let run = a_run(Outcome::Running, Trigger::Scheduled, None);
+        assert!(run_line(&run, &TimeZone::UTC).ends_with("running\t-"));
     }
 }
