@@ -29,6 +29,13 @@ const SHEET: usize = 6;
 /// job end in the same column.
 const LAST: usize = 28;
 
+/// The columns an ordinary coming run takes: `next tomorrow 16:05` and a few
+/// to spare.
+const COMING: usize = 22;
+
+/// How many runs the job screen keeps in view before its facts give way.
+const RUNS: usize = 3;
+
 /// The rows left for what scrolls on a terminal `height` rows tall: all but
 /// the header, the line under it, the notice and the shortcut bar.
 pub fn page(height: u16) -> usize {
@@ -182,14 +189,16 @@ fn header<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Line<'a> 
         Screen::Jobs => {
             let all = &app.snapshot.jobs;
             let chosen = all.iter().position(|job| job.name == name);
-            format!("jobs{}", folio(chosen, all.len(), rows / ENTRY))
+            let visible = rows.saturating_sub(problem(app, width).len()) / ENTRY;
+            format!("jobs{}", folio(chosen, all.len(), visible))
         }
         Screen::Job => {
             let runs = job.map_or(&[][..], |job| job.runs.as_slice());
             let chosen = runs
                 .iter()
                 .position(|one| Some(&one.id) == app.run.as_ref());
-            let visible = rows.saturating_sub(SHEET);
+            let left = rows.saturating_sub(problem(app, width).len());
+            let visible = left.saturating_sub(sheet(left));
             format!("{name}{}", folio(chosen, runs.len(), visible))
         }
         Screen::Log => match run {
@@ -374,6 +383,17 @@ fn second_line(job: &JobView, now: &Zoned, width: usize) -> Line<'static> {
         };
         width_of(&lead) + strip + 2 + width_of(ending) <= edge
     };
+    // Too narrow for the fixed column: the strips still stack when the
+    // coming run is given the room of an ordinary one.
+    let padded = COMING.saturating_sub(width_of(&lead).saturating_sub(3));
+    for gap in [2 + padded, 2] {
+        for ending in &endings {
+            let room = width_of(&lead) + gap + width_of(&marks) + 2 + width_of(ending);
+            if !marks.is_empty() && room <= edge {
+                return build(marks, gap, ending);
+            }
+        }
+    }
     for ending in &endings {
         if fits(&marks, ending) {
             return build(marks, 2, ending);
@@ -406,6 +426,13 @@ fn first_line<'a>(job: &'a JobView, chosen: bool, marker: bool, width: usize) ->
     )
 }
 
+/// The rows the job screen spends above its runs when `left` are free: the
+/// whole sheet, or only the entry and the rule when the runs would be left
+/// with too few.
+fn sheet(left: usize) -> usize {
+    if left >= SHEET + RUNS { SHEET } else { ENTRY }
+}
+
 /// The first of the rows to draw so that row `selected` is among `visible`.
 fn first_visible(selected: usize, visible: usize) -> usize {
     (selected + 1).saturating_sub(visible.max(1))
@@ -421,8 +448,6 @@ fn problem(app: &App, width: usize) -> Vec<Line<'_>> {
     let Some(error) = &app.snapshot.error else {
         return Vec::new();
     };
-    // A parser reports over several lines, with a drawing of the place:
-    // `wrapped` makes one sentence of it.
     // The file is the one otto was opened with: its name is enough, and its
     // directory would take the line the reason needs.
     let path = app.snapshot.config.display().to_string();
@@ -435,8 +460,21 @@ fn problem(app: &App, width: usize) -> Vec<Line<'_>> {
         Some(name) if !path.is_empty() => error.replace(&path, &name),
         _ => error.clone(),
     };
+    // A parser reports over several lines and draws the place (`1 | jobs = 3`,
+    // `  |    ^`). Folded into a sentence the drawing means nothing: it is
+    // left out, and the lines that say something are joined.
+    let said: Vec<&str> = error
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            let drawn = line
+                .split_once('|')
+                .is_some_and(|(before, _)| before.chars().all(|c| c.is_ascii_digit() || c == ' '));
+            !line.is_empty() && !drawn
+        })
+        .collect();
     let room = width.saturating_sub(4);
-    let mut parts = wrapped(&error, room);
+    let mut parts = wrapped(&said.join(", "), room);
     if parts.len() > 2 {
         parts.truncate(2);
         if let Some(end) = parts.last_mut() {
@@ -511,15 +549,18 @@ fn job<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a>
     // The same entry the list shows, opened: its facts and its runs follow.
     lines.push(first_line(job, true, false, width));
     lines.push(second_line(job, now, width));
-    lines.push(fact(
-        "workdir",
-        tail(&job.job.workdir.display().to_string(), room),
-    ));
-    lines.push(fact(
-        "prompt",
-        tail(&job.job.prompt.display().to_string(), room),
-    ));
-    lines.push(fact("args", cut(&args, room)));
+    // On a short terminal the facts give way to the runs.
+    if sheet(rows.saturating_sub(lines.len() - 2)) == SHEET {
+        lines.push(fact(
+            "workdir",
+            tail(&job.job.workdir.display().to_string(), room),
+        ));
+        lines.push(fact(
+            "prompt",
+            tail(&job.job.prompt.display().to_string(), room),
+        ));
+        lines.push(fact("args", cut(&args, room)));
+    }
     lines.push(rule(width));
 
     if job.runs.is_empty() {
@@ -577,7 +618,7 @@ const ACTIONS: [(&str, &str); 8] = [
     ("r", "run the job now"),
     ("x", "stop the run in progress"),
     ("p", "pause the schedule"),
-    ("s", "skip the next scheduled run"),
+    ("s", "skip the next run"),
     ("u", "resume the schedule"),
     ("e", "edit the prompt"),
 ];
@@ -628,7 +669,7 @@ fn help() -> Vec<Line<'static>> {
         .map(|((key, what), right)| {
             let mut spans = vec![
                 Span::styled(format!(" {key:<6}"), strong()),
-                Span::raw(format!("{what:<28}")),
+                Span::raw(format!("{what:<26}")),
             ];
             spans.extend(right);
             Line::from(spans)
@@ -1067,7 +1108,7 @@ mod tests {
             "run the job now",
             "stop the run in progress",
             "pause the schedule",
-            "skip the next scheduled run",
+            "skip the next run",
             "resume the schedule",
             "edit the prompt",
             "quit",
@@ -1128,10 +1169,13 @@ mod tests {
         let mut app = app(vec![job("report")]);
         app.snapshot.error = Some("invalid config jobs.toml: TOML parse error\n  |\n1 | jobs = 3\n  |        ^\ninvalid type".to_owned());
         let text = screen(&app, 80, 24);
+        // The parser's drawing of the place is left out: it does not survive
+        // being folded into a sentence.
         assert!(
-            text.contains("TOML parse error | 1 | jobs = 3 | ^ invalid type"),
+            text.contains("jobs.toml: TOML parse error, invalid type"),
             "{text}"
         );
+        assert!(!text.contains("jobs = 3"));
     }
 
     #[test]
@@ -1207,6 +1251,46 @@ mod tests {
             .unwrap();
         assert!(line.contains("✓ ✗"), "{text}");
         assert!(line.contains("failed (3)"));
+    }
+
+    #[test]
+    fn the_strips_stack_on_the_narrowest_terminal_too() {
+        let today = busy();
+        let tomorrow = JobView {
+            next: Some(Next::At(local("2026-10-07T16:05"))),
+            ..JobView {
+                name: "triage".to_owned(),
+                ..busy()
+            }
+        };
+        let text = screen(&app(vec![today, tomorrow]), MIN.0, 24);
+        let newest: Vec<usize> = text
+            .lines()
+            .filter(|line| line.contains(" │ next"))
+            .map(|line| line.chars().position(|c| c == '✗').unwrap())
+            .collect();
+        assert_eq!(newest.len(), 2, "{text}");
+        assert_eq!(newest[0], newest[1], "{text}");
+    }
+
+    #[test]
+    fn the_folio_counts_what_the_error_block_hides() {
+        let mut app = app(vec![job("alpha"), job("beta"), job("gamma")]);
+        // Ten rows of body hold the three entries, but not under an error.
+        assert!(!screen(&app, 80, 14).contains(" of 3"));
+        app.snapshot.error = Some("invalid config jobs.toml: job x".to_owned());
+        assert!(screen(&app, 80, 14).contains("jobs · 1 of 3"));
+    }
+
+    #[test]
+    fn the_facts_of_a_job_give_way_to_its_runs() {
+        let mut app = on_the_job();
+        app.snapshot.error = Some("invalid config jobs.toml: job x".to_owned());
+        let small = screen(&app, MIN.0, MIN.1);
+        assert!(small.contains("▸ ✓"), "{small}");
+        assert!(!small.contains("workdir"));
+        // With room, they are all there.
+        assert!(screen(&app, 80, 24).contains("workdir"));
     }
 
     #[test]
@@ -1333,7 +1417,8 @@ mod tests {
         let mut app = app(vec![job("report")]);
         app.act(Action::Help);
         let text = screen(&app, MIN.0, MIN.1);
-        assert!(text.contains("skip the next scheduled run ✓ ok"), "{text}");
+        assert!(text.contains("stop the run in progress  ?"), "{text}");
+        assert!(text.contains("skip the next run  "), "{text}");
     }
 
     #[test]
