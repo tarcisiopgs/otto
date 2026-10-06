@@ -77,6 +77,22 @@ fn checked(text: String) -> Result<String> {
     Ok(text)
 }
 
+/// What an edit of `original` gives. An edit may repair a file that was
+/// invalid, by removing the job that broke it; one that leaves it invalid
+/// is refused, and the blame goes where it belongs.
+fn settled(original: &str, edited: String) -> Result<String> {
+    match checked(edited) {
+        Ok(text) => Ok(text),
+        Err(error) => {
+            valid(original)?;
+            Err(error)
+        }
+    }
+}
+
+const BY_HAND: &str = "this job is written with dotted keys inside an inline table, \
+     where otto cannot add or remove a key: change it by hand in the jobs file";
+
 fn no_job(name: &str) -> String {
     format!("no job named {name:?}")
 }
@@ -156,6 +172,21 @@ impl<'a> Container<'a> {
         }
     }
 
+    /// Whether a key can be added to or taken from this table as one piece
+    /// of text. Inside `{ … }`, dotted keys spell out tables whose entries
+    /// can sit anywhere among the others.
+    fn in_one_piece(self) -> bool {
+        match self {
+            Container::Table(_) => true,
+            Container::Inline(table) => {
+                !table.is_dotted()
+                    && table.iter().all(|(_, value)| {
+                        !value.as_inline_table().is_some_and(InlineTable::is_dotted)
+                    })
+            }
+        }
+    }
+
     fn entries(self) -> Vec<(&'a Key, &'a Item)> {
         let names: Vec<&str> = match self {
             Container::Table(table) => table.iter().map(|(name, _)| name).collect(),
@@ -198,6 +229,9 @@ type Edit = (Span, String);
 
 /// Adds `key = value` to a table that does not have it.
 fn insert(text: &str, container: Container, key: &str, value: &str) -> Result<Edit> {
+    if !container.in_one_piece() {
+        bail!(BY_HAND);
+    }
     match container {
         // After the last entry, on the same line as it.
         Container::Inline(_) => {
@@ -239,10 +273,23 @@ fn delete(text: &str, container: Container, key: &str) -> Result<Edit> {
     let (found, item) = container
         .entry(key)
         .with_context(|| format!("no key named {key}"))?;
+    if !container.in_one_piece() {
+        bail!(BY_HAND);
+    }
     let (start, end) = (key_start(found)?, span_of(item)?.end);
+    let lines = line_start(text, start)..line_end(text, end);
+    // Alone on its lines: nothing before the key, and after the value only a
+    // comma and a comment.
+    let alone = text[lines.start..start].trim().is_empty() && {
+        let rest = text[end..lines.end].trim();
+        let rest = rest.strip_prefix(',').unwrap_or(rest).trim_start();
+        rest.is_empty() || rest.starts_with('#')
+    };
     let span = match container {
         // The lines of the key and its value. A comment above them stays.
-        Container::Table(_) => line_start(text, start)..line_end(text, end),
+        Container::Table(_) => lines,
+        // An inline table over several lines, one entry to a line: the same.
+        Container::Inline(_) if alone => lines,
         // The entry and the comma that goes with it.
         Container::Inline(_) => {
             let mut before = None;
@@ -265,15 +312,24 @@ fn delete(text: &str, container: Container, key: &str) -> Result<Edit> {
     Ok((span, String::new()))
 }
 
-/// The text with every edit made. Edits never overlap: each is one value, or
-/// one key with its value.
-fn apply(text: &str, mut edits: Vec<Edit>) -> String {
-    edits.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
+/// The text with every edit made, from the last place to the first, so no
+/// edit moves the place of one still to make. Where a key is taken out and
+/// another put in at the same place, the one taken out goes first: the other
+/// way round, the new text would be what is removed.
+fn apply(text: &str, mut edits: Vec<Edit>) -> Result<String> {
+    edits.sort_by_key(|(span, _)| std::cmp::Reverse((span.start, span.len())));
     let mut out = text.to_owned();
+    let mut floor = text.len();
     for (span, new) in edits {
+        // Each edit is one value, or one key with its value: two of them
+        // reaching into each other is a file otto did not foresee.
+        if span.end > floor {
+            bail!("otto cannot make these changes together: change the jobs file by hand");
+        }
+        floor = span.start;
         out.replace_range(span, &new);
     }
-    out
+    Ok(out)
 }
 
 /// The job `name` as it is written in `text`. A schedule with no `days` comes
@@ -382,8 +438,11 @@ pub fn add(text: &str, name: &str, spec: &JobSpec) -> Result<String> {
         if !out.ends_with('\n') {
             out.push_str(end);
         }
-        let blank =
-            out.trim_end_matches(' ').ends_with(&format!("{end}{end}")) || out.ends_with("\n\n");
+        // The last line, which may hold nothing but spaces.
+        let last = out.trim_end_matches(['\r', '\n']).lines().next_back();
+        let blank = out.ends_with("\n\n")
+            || out.ends_with("\n\r\n")
+            || last.is_some_and(|line| line.trim().is_empty());
         if !blank {
             out.push_str(end);
         }
@@ -400,7 +459,6 @@ pub fn add(text: &str, name: &str, spec: &JobSpec) -> Result<String> {
 /// is gives the same text back.
 pub fn update(text: &str, name: &str, spec: &JobSpec) -> Result<String> {
     let (mark, text) = without_mark(text);
-    valid(text)?;
     let old = read(text, name)?;
     let doc = parse(text)?;
     let job = doc
@@ -433,7 +491,9 @@ pub fn update(text: &str, name: &str, spec: &JobSpec) -> Result<String> {
     if old.at != spec.at {
         edits.push((value(schedule, "at")?, literal(&spec.at)));
     }
-    if old.week() != spec.week() {
+    // `days = []` is read as every day and is not valid: it counts as a
+    // change even when every day is what is asked for.
+    if old.week() != spec.week() || (old.days.is_empty() && schedule.entry("days").is_some()) {
         let days = list(spec.week().into_iter().map(Weekday::toml_name));
         let written = schedule.entry("days").is_some();
         edits.push(match (written, spec.every_day()) {
@@ -454,7 +514,7 @@ pub fn update(text: &str, name: &str, spec: &JobSpec) -> Result<String> {
     if edits.is_empty() {
         return Ok(format!("{mark}{text}"));
     }
-    Ok(format!("{mark}{}", checked(apply(text, edits))?))
+    Ok(format!("{mark}{}", settled(text, apply(text, edits)?)?))
 }
 
 /// The lines a job takes in the file: under its own header, the header and
@@ -510,20 +570,34 @@ pub fn remove(text: &str, name: &str) -> Result<String> {
         .and_then(Container::of)
         .with_context(|| no_job(name))?;
     let (key, job) = jobs.entry(name).with_context(|| no_job(name))?;
-    valid(text)?;
 
     // `jobs = { a = { … } }`: the job is a piece of one line.
     if let Container::Inline(_) = jobs {
         let edit = delete(text, jobs, name)?;
-        return Ok(format!("{mark}{}", checked(apply(text, vec![edit]))?));
+        return Ok(format!(
+            "{mark}{}",
+            settled(text, apply(text, vec![edit])?)?
+        ));
     }
+
+    // Where every value and header of the file ends. A line that starts with
+    // `#` above one of these is inside a value, and is no comment.
+    let mut ends = Vec::new();
+    // From the top-level entries down: the document itself has no place.
+    doc.iter().for_each(|(_, item)| ends_of(item, &mut ends));
 
     let mut spans = Vec::new();
     lines_of(text, key, job, &mut spans)?;
     for span in &mut spans {
         // The comment right above, unless it is what the file opens with.
+        let written = ends
+            .iter()
+            .copied()
+            .filter(|end| *end <= span.start)
+            .max()
+            .map_or(0, |end| line_end(text, end));
         let mut start = span.start;
-        while start > 0 {
+        while start > written {
             let above = line_start(text, start - 1);
             if !text[above..start].trim_start().starts_with('#') {
                 break;
@@ -572,7 +646,27 @@ pub fn remove(text: &str, name: &str) -> Result<String> {
         .into_iter()
         .map(|span| (span, String::new()))
         .collect();
-    Ok(format!("{mark}{}", checked(apply(text, edits))?))
+    Ok(format!("{mark}{}", settled(text, apply(text, edits)?)?))
+}
+
+/// Where each value and each table header under `item` ends in the text.
+fn ends_of(item: &Item, out: &mut Vec<usize>) {
+    match item {
+        Item::Value(value) => out.extend(value.span().map(|span| span.end)),
+        Item::Table(table) => {
+            if !table.is_dotted() && !table.is_implicit() {
+                out.extend(table.span().map(|span| span.end));
+            }
+            table.iter().for_each(|(_, inner)| ends_of(inner, out));
+        }
+        Item::ArrayOfTables(tables) => {
+            for table in tables.iter() {
+                out.extend(table.span().map(|span| span.end));
+                table.iter().for_each(|(_, inner)| ends_of(inner, out));
+            }
+        }
+        Item::None => {}
+    }
 }
 
 /// Writes `text` to the jobs file at `path`. `read` is the text the change was
@@ -622,6 +716,171 @@ mod tests {
             .unwrap()
             .jobs
             .len()
+    }
+
+    /// Days added on the line where the arguments are taken out: two edits
+    /// that start at the same byte.
+    #[test]
+    fn an_insert_and_a_delete_at_the_same_place_do_not_collide() {
+        let dotted = "[jobs.a]\nagent = \"claude\"\nprompt = \"a.md\"\nworkdir = \".\"\nschedule.at = \"07:00\"\nARGS\n";
+        let all_dotted = "jobs.a.agent = \"claude\"\njobs.a.prompt = \"a.md\"\njobs.a.workdir = \".\"\njobs.a.schedule.at = \"07:00\"\njobs.a.ARGS\n";
+        let lines = [
+            "args = [\"-x\"]",
+            "args = [\"xxxxxxxxxxxxxxxxxxx\"]",
+            "args = [\"-x\"] # nnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+        ];
+        for style in [dotted, all_dotted] {
+            for line in lines {
+                let text = style.replace("ARGS", line);
+                let wanted = JobSpec {
+                    days: vec![Weekday::Tue, Weekday::Thu],
+                    args: Vec::new(),
+                    ..read(&text, "a").unwrap()
+                };
+                let changed = update(&text, "a", &wanted).unwrap();
+                assert_eq!(read(&changed, "a").unwrap(), wanted, "{changed}");
+            }
+        }
+    }
+
+    /// Every pair of changes on every style: none may undo or mangle another.
+    #[test]
+    fn any_two_changes_at_once_both_take() {
+        let bare = [
+            "[jobs.a]\nagent = \"claude\"\nprompt = \"a.md\"\nworkdir = \".\"\nschedule = { at = \"07:00\" }\n",
+            "[jobs.a]\nagent = \"claude\"\nprompt = \"a.md\"\nworkdir = \".\"\n\n[jobs.a.schedule]\nat = \"07:00\"\n",
+            "[jobs.a]\nagent = \"claude\"\nprompt = \"a.md\"\nworkdir = \".\"\nschedule.at = \"07:00\"\n",
+            "jobs.a.agent = \"claude\"\njobs.a.prompt = \"a.md\"\njobs.a.workdir = \".\"\njobs.a.schedule.at = \"07:00\"\n",
+            "[jobs]\na = { agent = \"claude\", prompt = \"a.md\", workdir = \".\", schedule = { at = \"07:00\" } }\n",
+        ];
+        for style in STYLES.into_iter().chain(bare) {
+            let written = read(style, "a").unwrap();
+            let days = [Vec::new(), vec![Weekday::Tue, Weekday::Thu]];
+            let args = [Vec::new(), vec!["--one".to_owned(), "two".to_owned()]];
+            for days in &days {
+                for args in &args {
+                    for at in ["07:00", "21:30"] {
+                        let wanted = JobSpec {
+                            days: days.clone(),
+                            args: args.clone(),
+                            at: at.to_owned(),
+                            ..written.clone()
+                        };
+                        let text = update(style, "a", &wanted).unwrap_or_else(|error| {
+                            panic!("{error:#}\nstyle:\n{style}\nwanted: {wanted:?}")
+                        });
+                        let got = read(&text, "a").unwrap();
+                        assert_eq!(got.week(), wanted.week(), "{text}");
+                        assert_eq!((got.args, got.at), (wanted.args, wanted.at), "{text}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dotted_keys_inside_an_inline_table_are_changed_but_never_added_or_removed() {
+        let text = "[jobs]\na = { agent = \"claude\", prompt = \"a.md\", workdir = \".\", schedule.at = \"07:00\", args = [\"-x\"], schedule.days = [\"mon\"] }\n";
+        let written = read(text, "a").unwrap();
+        // A value is changed where it is.
+        let later = JobSpec {
+            at: "08:00".to_owned(),
+            days: vec![Weekday::Fri],
+            ..written.clone()
+        };
+        assert_eq!(
+            update(text, "a", &later).unwrap(),
+            text.replace("07:00", "08:00").replace("\"mon\"", "\"fri\"")
+        );
+        // Taking a key out is refused, with the reason, and nothing is lost.
+        for wanted in [
+            JobSpec {
+                days: Vec::new(),
+                ..written.clone()
+            },
+            JobSpec {
+                args: Vec::new(),
+                ..written.clone()
+            },
+            JobSpec {
+                days: Vec::new(),
+                args: Vec::new(),
+                ..written.clone()
+            },
+        ] {
+            let error = update(text, "a", &wanted).unwrap_err();
+            assert!(format!("{error:#}").contains("by hand"), "{error:#}");
+        }
+        let no_days = text.replace(", schedule.days = [\"mon\"]", "");
+        let wanted = JobSpec {
+            days: vec![Weekday::Mon],
+            ..read(&no_days, "a").unwrap()
+        };
+        let error = update(&no_days, "a", &wanted).unwrap_err();
+        assert!(format!("{error:#}").contains("by hand"), "{error:#}");
+        // The job as a whole can still go.
+        assert_eq!(jobs(&remove(text, "a").unwrap()), 0);
+    }
+
+    #[test]
+    fn a_key_on_its_own_line_of_an_inline_table_goes_with_its_line_only() {
+        let text = "[jobs.a]\nagent = \"claude\"\nprompt = \"a.md\"\nworkdir = \".\"\nschedule = {\n  # k0\n  at = \"07:00\", # k1\n  # k2\n  days = [\"mon\"], # k3\n  # k4\n} # k5\n";
+        let wanted = JobSpec {
+            days: Vec::new(),
+            ..read(text, "a").unwrap()
+        };
+        assert_eq!(
+            update(text, "a", &wanted).unwrap(),
+            text.replace("  days = [\"mon\"], # k3\n", "")
+        );
+    }
+
+    #[test]
+    fn a_line_that_starts_with_a_hash_inside_a_string_is_not_a_comment() {
+        let text = "[jobs.a]\nagent = \"claude\"\nprompt = \"a.md\"\nworkdir = \".\"\nschedule = { at = \"07:00\" }\nargs = [\"-p\", \"\"\"\nDo this.\n# Heading\"\"\"]\n[jobs.b]\nagent = \"codex\"\nprompt = \"b.md\"\nworkdir = \".\"\nschedule = { at = \"08:00\" }\n";
+        let removed = remove(text, "b").unwrap();
+        assert_eq!(removed, &text[..text.find("[jobs.b]").unwrap()]);
+        assert_eq!(read(&removed, "a").unwrap(), read(text, "a").unwrap());
+    }
+
+    #[test]
+    fn a_broken_job_can_be_removed_and_empty_days_repaired() {
+        let good = "[jobs.a]\nagent = \"claude\"\nprompt = \"a.md\"\nworkdir = \".\"\nschedule = { at = \"07:00\" }\n";
+        let broken = format!(
+            "{good}\n[jobs.b]\nagent = \"gemini\"\nprompt = \"b.md\"\nworkdir = \".\"\nschedule = {{ at = \"08:00\" }}\n"
+        );
+        assert_eq!(remove(&broken, "b").unwrap(), good);
+        // Removing the good one leaves the file as broken as it was.
+        let error = remove(&broken, "a").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("not valid as it is"),
+            "{error:#}"
+        );
+
+        let empty = "[jobs.a]\nagent = \"claude\"\nprompt = \"a.md\"\nworkdir = \".\"\nschedule = { at = \"07:00\", days = [] }\n";
+        let every_day = JobSpec {
+            days: Weekday::every_day(),
+            ..read(empty, "a").unwrap()
+        };
+        assert_eq!(update(empty, "a", &every_day).unwrap(), good);
+        let mondays = JobSpec {
+            days: vec![Weekday::Mon],
+            ..every_day
+        };
+        assert_eq!(
+            update(empty, "a", &mondays).unwrap(),
+            empty.replace("days = []", "days = [\"mon\"]")
+        );
+    }
+
+    #[test]
+    fn a_last_line_of_only_spaces_counts_as_blank() {
+        let spaced = format!("{SAMPLE}   \n");
+        let added = add(&spaced, "nightly", &nightly()).unwrap();
+        assert!(
+            added[spaced.len()..].starts_with("[jobs.nightly]\n"),
+            "{added}"
+        );
     }
 
     /// A job written every way the form may find one.
@@ -904,7 +1163,6 @@ schedule = { at = \"09:00\" }
         };
         for error in [
             update(broken, "a", &spec).unwrap_err(),
-            remove(broken, "a").unwrap_err(),
             add(broken, "nightly", &nightly()).unwrap_err(),
         ] {
             assert!(
@@ -912,6 +1170,8 @@ schedule = { at = \"09:00\" }
                 "{error:#}"
             );
         }
+        // Taking the broken job out is how such a file is repaired.
+        assert_eq!(remove(broken, "a").unwrap(), "");
     }
 
     #[test]
