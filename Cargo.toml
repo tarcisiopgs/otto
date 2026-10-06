@@ -15,6 +15,7 @@ readme = "README.md"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 jiff = { version = "0.2", features = ["serde"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
 

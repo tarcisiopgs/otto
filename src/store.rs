@@ -371,6 +371,23 @@ impl Run {
         self.finished
             .map(|finished| finished.duration_since(self.started).as_secs())
     }
+
+    /// How the run ended, with the exit code of one that failed: `failed (3)`.
+    pub fn outcome_label(&self) -> String {
+        match (self.outcome, self.exit_code) {
+            (Outcome::Failed, Some(code)) => format!("failed ({code})"),
+            (outcome, _) => outcome.label().to_owned(),
+        }
+    }
+
+    /// How long the agent ran. A run that did not start the agent, or has not
+    /// ended, has no duration.
+    pub fn duration_label(&self) -> Option<String> {
+        match self.outcome {
+            Outcome::Running | Outcome::Skipped | Outcome::Paused => None,
+            _ => self.seconds().map(duration_label),
+        }
+    }
 }
 
 /// `9s`, `2m 14s`, `1h 02m`.
@@ -444,6 +461,40 @@ mod tests {
     /// Every process the store asks about is gone.
     fn dead() -> Recorder {
         Recorder::new().answering("kill -0", &[false])
+    }
+
+    #[test]
+    fn a_run_says_how_it_ended_and_how_long_it_took() {
+        let (_dir, store) = store();
+        let open = store
+            .begin("report", Trigger::Manual, 1, at("2026-10-05T19:16:26Z"))
+            .unwrap();
+        assert_eq!(open.outcome_label(), "running");
+        assert_eq!(open.duration_label(), None);
+
+        let failed = store
+            .finish("report", &open, Some(3), at("2026-10-05T19:18:40Z"))
+            .unwrap();
+        assert_eq!(failed.outcome_label(), "failed (3)");
+        assert_eq!(failed.duration_label().as_deref(), Some("2m 14s"));
+
+        let ok = Run {
+            outcome: Outcome::Ok,
+            exit_code: Some(0),
+            ..failed.clone()
+        };
+        assert_eq!(ok.outcome_label(), "ok");
+
+        let skipped = store
+            .record(
+                "report",
+                Trigger::Scheduled,
+                Outcome::Skipped,
+                at("2026-10-05T20:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(skipped.outcome_label(), "skipped");
+        assert_eq!(skipped.duration_label(), None);
     }
 
     #[test]

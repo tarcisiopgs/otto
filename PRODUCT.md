@@ -30,7 +30,7 @@ The agent runs on the user's machine with the user's credentials, tools and memo
 
 ## Capabilities and Constraints
 
-Built today (v0.2.0):
+Built today (v0.2.0, and the terminal UI not yet released):
 
 - `~/.config/otto/jobs.toml` describes jobs: agent, prompt file, working directory, schedule (`at` and optional `days`), extra agent arguments.
 - `otto sync` makes the scheduler match the jobs file: it adds, reloads and removes otto's units, and `--dry-run` only reports. Each unit carries the `PATH` of the terminal `sync` ran from. A job with a run in progress is reported as `busy` and left alone.
@@ -38,6 +38,8 @@ Built today (v0.2.0):
 - Skip and pause are separate. `otto skip <job>` drops the next scheduled run only; `otto pause <job>` stops scheduled runs until `otto resume <job>`. Both are recorded as runs that did not start the agent. A manual `otto run <job>` always runs and leaves them as they were.
 - `otto list` (with each job's state and last outcome), `otto plan <job>` (prints the scheduler unit `sync` would write) and `otto run <job>` (with `--dry-run`).
 - Scheduler backends for launchd and systemd behind one trait, and an experimental one for Windows Task Scheduler.
+- A terminal UI, `otto` with no subcommand: every job with its state, its next run, how its last run ended and a strip of marks for its latest runs; one job with its run history; the output of a run, followed while it lasts. From it the user runs a job now, stops a run, pauses, skips, resumes and opens the prompt in their editor. A run started there outlives the screen.
+- When a job runs next, computed by otto from the schedule and the job's state. `otto list` shows it too.
 
 Constraints:
 
@@ -47,9 +49,8 @@ Constraints:
 
 Not built, and not yet decided in detail:
 
-- The terminal UI itself.
+- Creating, editing and deleting a job from the terminal UI, and reviewing and applying the sync there. Today the jobs file is edited by hand and `otto sync` is a command.
 - Notifications when a run starts, finishes, fails or is skipped.
-- When a job runs next: otto does not compute it yet.
 - Prechecks and a grace window for a missed run.
 
 ## Brand Commitments
@@ -60,7 +61,7 @@ otto has its own identity. Lisa, the maintainer's other terminal tool, is a refe
 
 ## Evidence on Hand
 
-- No terminal UI exists and there are no screenshots or recordings. Do not present one as if it existed.
+- The terminal UI was driven end to end on 2026-10-06 in a throwaway setup: its own state directory, a jobs file of two made-up jobs and a fake `claude` on the `PATH`. Running, following the output, stopping, pausing, a jobs file broken from outside and a run that outlives the screen all behaved as described. It has not been used against the maintainer's real jobs, and there is no screenshot or recording of it yet: do not present one as if it existed.
 - `examples/jobs.toml` and `examples/prompts/linear-updates.md` are the shipped example.
 - An end-to-end test on 2026-10-05 ran one Claude Code job and one Codex job through launchd; both exited 0 and wrote the expected file. That test used hand-installed units, before `otto sync` existed; `otto sync` itself has not been run for real against launchd or systemd.
 - Memory use of otto has not been measured.

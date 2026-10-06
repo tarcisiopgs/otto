@@ -1,26 +1,31 @@
 mod agent;
 mod config;
+mod next;
+mod process;
 mod run;
 mod scheduler;
 mod store;
 mod sync;
+mod tui;
 mod which;
 
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal as _, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory as _, Parser, Subcommand};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 use config::Config;
+use next::Next;
 use run::Request;
 use scheduler::runner::System;
-use store::{Outcome, Run, State, Store, Trigger, duration_label};
+use store::{Run, State, Store, Trigger};
+use tui::world::{Real, Setup};
 
 #[derive(Parser)]
 #[command(
@@ -33,8 +38,9 @@ struct Cli {
     #[arg(long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
 
+    /// With none, and on a terminal, otto opens its terminal UI.
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -117,13 +123,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Some(path) => path,
         None => config::default_path()?,
     };
+    // The UI reads the jobs file itself, and opens without one.
+    let Some(command) = cli.command else {
+        return screen(&path);
+    };
     let config = Config::load(&path)?;
 
-    match cli.command {
+    match command {
         Cmd::List => {
             let store = store()?;
             let now = Timestamp::now();
+            let zone = TimeZone::system();
             for (name, job) in &config.jobs {
+                let state = store.state(name)?;
+                let next = next::next(&job.schedule, state, now, &zone).ok();
                 let last = store
                     .runs(name, &System, now)?
                     .first()
@@ -135,12 +148,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     .map(|day| day.systemd_name())
                     .collect();
                 println!(
-                    "{name}\t{:?}\t{} {}\t{}\t{}\t{last}",
+                    "{name}\t{:?}\t{} {}\t{}\t{}\t{last}\t{}",
                     job.agent,
                     job.schedule.at,
                     days.join(","),
                     job.workdir.display(),
-                    store.state(name)?.label()
+                    state.label(),
+                    next_column(next.as_ref())
                 );
             }
             Ok(ExitCode::SUCCESS)
@@ -288,10 +302,48 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 }
 
+/// `otto` with no subcommand opens the UI only when both ends are a terminal.
+fn opens_screen(has_command: bool, stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
+    !has_command && stdin_is_terminal && stdout_is_terminal
+}
+
+/// The terminal UI, or the help where there is no terminal to draw on.
+fn screen(config_path: &Path) -> Result<ExitCode> {
+    if !opens_screen(false, io::stdin().is_terminal(), io::stdout().is_terminal()) {
+        eprint!("{}", Cli::command().render_help());
+        return Ok(ExitCode::from(2));
+    }
+    let editor = ["VISUAL", "EDITOR"]
+        .iter()
+        .filter_map(|name| env::var(name).ok())
+        .find(|value| !value.trim().is_empty());
+    let zone = TimeZone::system();
+    let mut world = Real::new(Setup {
+        config: std::path::absolute(config_path)
+            .with_context(|| format!("cannot resolve {}", config_path.display()))?,
+        store: store()?,
+        runner: Box::new(System),
+        otto: env::current_exe().context("cannot locate the otto binary")?,
+        editor,
+        zone: zone.clone(),
+    });
+    tui::run(&mut world, &Timestamp::now, &zone)?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn set_state(store: &Store, job: &str, state: State) -> Result<ExitCode> {
     store.set_state(job, state)?;
     println!("{job}\t{}", state.label());
     Ok(ExitCode::SUCCESS)
+}
+
+/// The last column of `otto list`: the local time of the run that will start
+/// the agent, or `-` when no run is coming.
+fn next_column(next: Option<&Next>) -> String {
+    next.and_then(Next::runs_at).map_or_else(
+        || "-".to_owned(),
+        |when| when.strftime("%Y-%m-%d %H:%M").to_string(),
+    )
 }
 
 /// One run as a line of `otto runs`: id, local start, trigger, outcome, duration.
@@ -300,20 +352,12 @@ fn run_line(run: &Run, zone: &TimeZone) -> String {
         .started
         .to_zoned(zone.clone())
         .strftime("%Y-%m-%d %H:%M");
-    let outcome = match (run.outcome, run.exit_code) {
-        (Outcome::Failed, Some(code)) => format!("failed ({code})"),
-        (outcome, _) => outcome.label().to_owned(),
-    };
-    // A run that did not start the agent, or has not ended, has no duration.
-    let duration = match run.outcome {
-        Outcome::Running | Outcome::Skipped | Outcome::Paused => None,
-        _ => run.seconds(),
-    };
     format!(
-        "{}\t{started}\t{}\t{outcome}\t{}",
+        "{}\t{started}\t{}\t{}\t{}",
         run.id,
         run.trigger.label(),
-        duration.map_or_else(|| "-".to_owned(), duration_label)
+        run.outcome_label(),
+        run.duration_label().unwrap_or_else(|| "-".to_owned())
     )
 }
 
@@ -358,6 +402,40 @@ mod tests {
             Some("2026-10-05T19:16:26Z"),
         );
         assert!(run_line(&run, &TimeZone::UTC).ends_with("scheduled\tskipped\t-"));
+    }
+
+    #[test]
+    fn the_screen_opens_only_on_a_terminal_and_without_a_subcommand() {
+        assert!(opens_screen(false, true, true));
+        assert!(!opens_screen(true, true, true));
+        assert!(!opens_screen(false, false, true));
+        assert!(!opens_screen(false, true, false));
+    }
+
+    #[test]
+    fn the_next_column_is_the_run_that_will_start_the_agent() {
+        let zone = TimeZone::get("America/Sao_Paulo").unwrap();
+        let at = |text: &str| {
+            text.parse::<jiff::civil::DateTime>()
+                .unwrap()
+                .to_zoned(zone.clone())
+                .unwrap()
+        };
+        let today = at("2026-10-06T16:05");
+        let tomorrow = at("2026-10-07T16:05");
+        assert_eq!(
+            next_column(Some(&Next::At(today.clone()))),
+            "2026-10-06 16:05"
+        );
+        assert_eq!(
+            next_column(Some(&Next::Skipping {
+                skipped: today,
+                then: tomorrow
+            })),
+            "2026-10-07 16:05"
+        );
+        assert_eq!(next_column(Some(&Next::Paused)), "-");
+        assert_eq!(next_column(None), "-");
     }
 
     #[test]
