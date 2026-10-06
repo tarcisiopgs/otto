@@ -1,5 +1,6 @@
 mod agent;
 mod config;
+mod run;
 mod scheduler;
 mod store;
 mod sync;
