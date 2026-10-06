@@ -111,15 +111,15 @@ The next run is otto's own reading of the schedule, not something it asks the OS
 
 ### Creating and editing a job
 
-`n` opens a form for a new job and `E` opens it on the selected one: name, agent, working directory, time, days, arguments (one to a line) and the prompt file. `tab` moves between the fields, `space` marks an agent or a day, `ctrl-s` saves and `esc` leaves; every letter is text there, so the single-letter keys of the other screens do not apply.
+`n` opens a form for a new job and `E` opens it on the selected one: name, agent, time, days, working directory, prompt file and arguments (one to a line). `tab` moves between the fields, `space` marks an agent or a day, `ctrl-s` saves and `esc` leaves; every letter is text there, so the single-letter keys of the other screens do not apply. The line above the keys says what the field you are on takes.
 
-Saving writes `jobs.toml`, and only what changed in it: your comments, the order of the jobs and the layout of the file stay as they were. A job that cannot be saved says why in the words the jobs file is read with. A working directory that is not there, or an agent that is not on the `PATH`, is a note and does not stop the save, since `otto sync` checks both. If the file changed on disk while the form was open, the save is refused and the list is read again.
+Saving writes `jobs.toml`, and only what changed in it: your comments, the order of the jobs and the layout of the file stay as they were. A job that cannot be saved says why in the words the jobs file is read with, and the reason stays until you change the job. An empty working directory or prompt path is refused. A working directory that is not there, or an agent that is not on the `PATH`, is a note and does not stop the save, since `otto sync` checks both. If the file changed on disk while the form was open, the save is refused and the list is read again.
 
 A new job gets `prompts/<name>.md` beside the jobs file as its prompt, unless you type another path. A prompt file that does not exist is created and opened in your editor. The name of a job cannot be changed afterwards: it is what its history and its scheduler unit are kept under.
 
-No day marked means every day. The arguments start empty and otto suggests none: a scheduled run has nobody to answer a permission prompt, and what the agent may do is yours to write.
+No day marked means every day. Arguments the form cannot hold on a line each (one with a line break, with a space at an end, or empty) are kept exactly as the file has them and can only be changed there. The arguments start empty and otto suggests none: a scheduled run has nobody to answer a permission prompt, and what the agent may do is yours to write.
 
-`d` removes the job from `jobs.toml` after asking. Its prompt file and its history stay on disk.
+`d` removes the job from `jobs.toml` after asking. Its prompt file and its history stay on disk. A job with a run in progress is not deleted: stop the run first.
 
 **A job created, edited or deleted here is not scheduled until `otto sync`**, the same as after editing the file by hand.
 

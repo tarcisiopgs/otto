@@ -100,11 +100,11 @@ pub enum Focus {
 const ORDER: [Focus; 7] = [
     Focus::Name,
     Focus::Agent,
-    Focus::Workdir,
     Focus::At,
     Focus::Days,
-    Focus::Args,
+    Focus::Workdir,
     Focus::Prompt,
+    Focus::Args,
 ];
 
 /// One keystroke of editing, whichever key it was.
@@ -134,6 +134,13 @@ pub struct Form {
     pub day: usize,
     /// One argument to a line.
     pub args: Field,
+    /// The job has arguments this field cannot hold: one with a line break,
+    /// with a space at an end, or empty. They are kept as the file has them
+    /// and can only be changed there.
+    pub args_by_hand: bool,
+    /// The arguments as the file has them, for as long as the field is not
+    /// edited: what is read back from a field is only what it can hold.
+    written_args: Option<Vec<String>>,
     pub prompt: Field,
     /// The jobs file as it was when the form opened.
     pub read: String,
@@ -157,6 +164,8 @@ impl Form {
             days: [false; 7],
             day: 0,
             args: Field::new(""),
+            args_by_hand: false,
+            written_args: None,
             prompt: Field::new(""),
             read,
             prompt_follows: true,
@@ -179,15 +188,18 @@ impl Form {
     /// A form holding the job `name` as the jobs file writes it.
     pub fn edit(read: String, name: &str) -> Result<Form> {
         let spec = jobs_file::read(&read, name)?;
-        let week = Weekday::every_day();
+        let mut days = [false; 7];
+        for (marked, day) in days.iter_mut().zip(Weekday::every_day()) {
+            *marked = spec.days.contains(&day);
+        }
         // A job that runs every day opens with no day marked, which says the
         // same and is what the file gets back.
-        let mut days = [false; 7];
-        if spec.days.len() < week.len() {
-            for (marked, day) in days.iter_mut().zip(&week) {
-                *marked = spec.days.contains(day);
-            }
+        if days == [true; 7] {
+            days = [false; 7];
         }
+        let fits_a_line =
+            |arg: &String| !arg.is_empty() && arg.trim() == arg && !arg.contains(['\n', '\r']);
+        let args_by_hand = !spec.args.iter().all(fits_a_line);
         let mut form = Form {
             editing: Some(name.to_owned()),
             focus: Focus::Agent,
@@ -197,7 +209,13 @@ impl Form {
             at: Field::new(&spec.at),
             days,
             day: 0,
-            args: Field::new(&spec.args.join("\n")),
+            args: Field::new(&if args_by_hand {
+                String::new()
+            } else {
+                spec.args.join("\n")
+            }),
+            args_by_hand,
+            written_args: Some(spec.args.clone()),
             prompt: Field::new(&spec.prompt),
             read,
             prompt_follows: false,
@@ -225,14 +243,17 @@ impl Form {
             } else {
                 marked
             },
-            args: self
-                .args
-                .text()
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_owned)
-                .collect(),
+            args: match &self.written_args {
+                Some(written) => written.clone(),
+                None => self
+                    .args
+                    .text()
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            },
         }
     }
 
@@ -309,6 +330,8 @@ impl Form {
             }
             // The name is the job's history and its unit: it does not change.
             Focus::Name if self.editing.is_some() => return,
+            // Typing here would replace arguments the field cannot show.
+            Focus::Args if self.args_by_hand => return,
             Focus::Name => &mut self.name,
             Focus::Workdir => &mut self.workdir,
             Focus::At => &mut self.at,
@@ -329,6 +352,8 @@ impl Form {
         match self.focus {
             // A prompt the user has put a hand on is theirs from then on.
             Focus::Prompt if changed => self.prompt_follows = false,
+            // From here on the arguments are what the field holds.
+            Focus::Args if changed => self.written_args = None,
             Focus::Name if changed && self.prompt_follows => {
                 self.prompt = Field::new(&match self.name.text() {
                     "" => String::new(),
@@ -511,11 +536,11 @@ mod tests {
     #[test]
     fn the_name_cannot_be_reached_or_changed_while_editing() {
         let mut form = Form::edit(SAMPLE.to_owned(), "linear-updates").unwrap();
-        form.focus = Focus::Prompt;
+        form.focus = Focus::Args;
         form.next_field();
         assert_eq!(form.focus, Focus::Agent);
         form.prev_field();
-        assert_eq!(form.focus, Focus::Prompt);
+        assert_eq!(form.focus, Focus::Args);
         // Even put there, typing does nothing.
         form.focus = Focus::Name;
         typed(&mut form, "x");
@@ -535,16 +560,16 @@ mod tests {
             [
                 Focus::Name,
                 Focus::Agent,
-                Focus::Workdir,
                 Focus::At,
                 Focus::Days,
-                Focus::Args,
+                Focus::Workdir,
                 Focus::Prompt,
+                Focus::Args,
                 Focus::Name
             ]
         );
         form.prev_field();
-        assert_eq!(form.focus, Focus::Prompt);
+        assert_eq!(form.focus, Focus::Args);
     }
 
     #[test]
@@ -596,6 +621,73 @@ mod tests {
         form.focus = Focus::Args;
         typed(&mut form, "--model\n\n  \nsonnet 5\n");
         assert_eq!(form.spec().args, ["--model", "sonnet 5"]);
+    }
+
+    /// One job, `a`, at 07:00, with these arguments as TOML.
+    fn with_args(args: &str) -> String {
+        format!(
+            "[jobs.a]\nagent = \"claude\"\nprompt = \"a.md\"\nworkdir = \".\"\nschedule = {{ at = \"07:00\" }}\nargs = {args}\n"
+        )
+    }
+
+    /// A line break, spaces at the ends, an argument that is empty: none of
+    /// these fits a field that holds one argument to a line.
+    #[test]
+    fn arguments_the_field_cannot_hold_are_left_as_written() {
+        for args in [
+            r#"["--append-system-prompt", "line one\nline two"]"#,
+            r#"["-p", " padded "]"#,
+            r#"["--flag", ""]"#,
+        ] {
+            let text = with_args(args);
+            let mut form = Form::edit(text.clone(), "a").unwrap();
+            assert!(form.args_by_hand, "{args}");
+            assert!(!form.dirty());
+            let written = jobs_file::read(&text, "a").unwrap().args;
+            assert_eq!(form.spec().args, written);
+
+            // Another field changes: the arguments stay byte for byte.
+            form.focus = Focus::At;
+            form.input(Edit::Backspace);
+            typed(&mut form, "5");
+            assert_eq!(form.result().unwrap(), text.replace("07:00", "07:05"));
+
+            // And the field does not take typing that would lose them.
+            form.focus = Focus::Args;
+            typed(&mut form, "x");
+            form.input(Edit::Backspace);
+            assert_eq!(form.spec().args, written);
+        }
+    }
+
+    #[test]
+    fn arguments_are_written_again_only_when_their_field_is_edited() {
+        let text = with_args(r#"["--model",   "sonnet"]"#);
+        let mut form = Form::edit(text.clone(), "a").unwrap();
+        assert!(!form.args_by_hand);
+        assert_eq!(form.args.text(), "--model\nsonnet");
+        form.focus = Focus::Args;
+        // Moving in the field is not editing it.
+        form.input(Edit::Left);
+        assert_eq!(form.result().unwrap(), text);
+        form.input(Edit::End);
+        typed(&mut form, "\n--verbose");
+        assert_eq!(form.spec().args, ["--model", "sonnet", "--verbose"]);
+        assert!(form.dirty());
+    }
+
+    #[test]
+    fn seven_entries_of_one_day_are_that_day() {
+        let text = with_args("[]").replace(
+            "{ at = \"07:00\" }",
+            "{ at = \"07:00\", days = [\"mon\", \"mon\", \"mon\", \"mon\", \"mon\", \"mon\", \"mon\"] }",
+        );
+        let mut form = Form::edit(text.clone(), "a").unwrap();
+        assert_eq!(form.days, [true, false, false, false, false, false, false]);
+        form.focus = Focus::At;
+        form.input(Edit::Backspace);
+        typed(&mut form, "5");
+        assert_eq!(form.result().unwrap(), text.replace("07:00", "07:05"));
     }
 
     #[test]

@@ -144,6 +144,10 @@ pub struct App {
     /// What saving the form as it stands would run into later: a working
     /// directory that is not there, an agent that is not on the `PATH`.
     pub warnings: Vec<String>,
+    /// Why the form could not be saved. It stays on screen until the job
+    /// changes: a notice goes with the next key, and the next key is the one
+    /// that takes the user to the field.
+    pub reason: Option<String>,
     /// Where `Back` leaves the help screen.
     behind_help: Screen,
     /// Where closing the form goes back to.
@@ -170,6 +174,7 @@ impl App {
             notice: None,
             form: None,
             warnings: Vec::new(),
+            reason: None,
             behind_help: Screen::Jobs,
             behind_form: Screen::Jobs,
             log_is_partial: false,
@@ -207,13 +212,29 @@ impl App {
         self.snapshot = snapshot;
         // A question about a run that is over, or about a job that is gone,
         // has nothing left to answer.
-        if let Some(Confirm::Stop { job, pid }) = &self.confirm {
-            let still_running = self.snapshot.jobs.iter().any(|view| {
+        let listed = |name: &str| self.snapshot.jobs.iter().any(|view| view.name == name);
+        let answerable = match &self.confirm {
+            Some(Confirm::Stop { job, pid }) => self.snapshot.jobs.iter().any(|view| {
                 view.name == *job && view.running().is_some_and(|run| run.pid == Some(*pid))
-            });
-            if !still_running {
-                self.confirm = None;
-            }
+            }),
+            Some(Confirm::Delete { job }) => listed(job),
+            Some(Confirm::Discard) | None => true,
+        };
+        if !answerable {
+            self.confirm = None;
+        }
+        // The same for the form of a job that is no longer in the file: what
+        // it would save over is gone.
+        let orphaned = self
+            .form
+            .as_ref()
+            .and_then(|form| form.editing.clone())
+            .filter(|job| !listed(job));
+        if let Some(job) = orphaned {
+            self.close_form();
+            self.confirm = None;
+            self.screen = Screen::Jobs;
+            self.say(format!("{job} is no longer in the jobs file"));
         }
         let jobs = &self.snapshot.jobs;
         if self.selected().is_none() {
@@ -335,20 +356,68 @@ impl App {
         self.screen = Screen::Jobs;
         self.job = Some(job.to_owned());
         self.run = None;
+        // The list shows the job with a next run, and it has no unit yet.
+        self.say(format!("{job} saved; otto sync schedules it"));
+    }
+
+    /// The job was taken out of the jobs file.
+    pub fn deleted(&mut self, job: &str) {
+        self.say(format!("{job} deleted; otto sync removes its unit"));
     }
 
     /// The form could not be written. It stays, with the reason, unless the
-    /// file changed under it: then what it was built on is gone, and so is it.
-    pub fn save_failed(&mut self, text: String) {
-        if text.contains("changed on disk") {
+    /// file `changed` under it: then what it was built on is gone, and so is
+    /// it, and the list reads the file again.
+    pub fn save_failed(&mut self, text: String, changed: bool) {
+        let text = if changed {
             self.close_form();
-        }
+            "not saved: the jobs file changed on disk meanwhile".to_owned()
+        } else {
+            text
+        };
         self.notice = Some(Notice { text, error: true });
+    }
+
+    /// Text pasted into the terminal. It goes into the field in focus as
+    /// text: a line break in it is not Enter, and a `y` is not an answer.
+    pub fn paste(&mut self, text: &str) -> Vec<Effect> {
+        if self.screen != Screen::Form || self.confirm.is_some() {
+            return Vec::new();
+        }
+        let Some(form) = self.form.as_mut() else {
+            return Vec::new();
+        };
+        let before = form.spec();
+        let lines = form.focus == crate::tui::form::Focus::Args;
+        // Windows ends a line with both; one of them is enough.
+        for c in text.replace("\r\n", "\n").chars() {
+            match c {
+                '\n' | '\r' if lines => form.input(Edit::Insert('\n')),
+                '\n' | '\r' | '\t' => form.input(Edit::Insert(' ')),
+                c if c.is_control() => {}
+                c => form.input(Edit::Insert(c)),
+            }
+        }
+        self.changed_from(&before)
+    }
+
+    /// What follows from the job in the form no longer being `before`: the
+    /// reason it could not be saved is about a job that is gone, and what to
+    /// warn about is to be asked again.
+    fn changed_from(&mut self, before: &JobSpec) -> Vec<Effect> {
+        match self.form.as_ref().map(Form::spec) {
+            Some(spec) if spec != *before => {
+                self.reason = None;
+                vec![Effect::Check { spec }]
+            }
+            _ => Vec::new(),
+        }
     }
 
     fn close_form(&mut self) {
         self.form = None;
         self.warnings.clear();
+        self.reason = None;
         if self.screen == Screen::Form {
             self.screen = self.behind_form;
         }
@@ -366,7 +435,9 @@ impl App {
             Action::Toggle => form.toggle(),
             Action::NextField => form.next_field(),
             Action::PrevField => form.prev_field(),
-            Action::Save if !form.dirty() => self.close_form(),
+            // A job that exists and was not touched has nothing to save. A
+            // new one is always tried, so an empty form says what it lacks.
+            Action::Save if form.editing.is_some() && !form.dirty() => self.close_form(),
             Action::Save => match form.result() {
                 Ok(text) => {
                     let spec = form.spec();
@@ -385,10 +456,21 @@ impl App {
                         Some((first, rest)) if first.contains("would not be valid") => rest,
                         _ => causes.as_slice(),
                     };
-                    self.notice = Some(Notice {
-                        text: said.join(": "),
-                        error: true,
-                    });
+                    let said = said.join(": ");
+                    // The field it is about, as far as the words tell.
+                    use crate::tui::form::Focus;
+                    let named = [
+                        ("schedule.at", Focus::At),
+                        ("schedule.days", Focus::Days),
+                        ("workdir", Focus::Workdir),
+                        ("prompt", Focus::Prompt),
+                        ("job name", Focus::Name),
+                        ("already exists", Focus::Name),
+                    ];
+                    if let Some((_, focus)) = named.iter().find(|(word, _)| said.contains(word)) {
+                        form.focus = *focus;
+                    }
+                    self.reason = Some(said);
                 }
             },
             // Leaving otto from the form would lose it without a word.
@@ -401,10 +483,7 @@ impl App {
             }
             _ => {}
         }
-        match self.form.as_ref().map(Form::spec) {
-            Some(spec) if spec != before => vec![Effect::Check { spec }],
-            _ => Vec::new(),
-        }
+        self.changed_from(&before)
     }
 
     /// The actions that change the jobs file for the selected job.
@@ -412,11 +491,18 @@ impl App {
         if !matches!(self.screen, Screen::Jobs | Screen::Job) {
             return Vec::new();
         }
-        let Some(job) = self.selected().map(|job| job.name.clone()) else {
+        let Some(selected) = self.selected() else {
             return Vec::new();
         };
+        let job = selected.name.clone();
+        let running = selected.running().is_some();
         match action {
             Action::EditJob => vec![Effect::OpenForm { job: Some(job) }],
+            // Out of the file, its run could no longer be seen or stopped.
+            Action::Delete if running => {
+                self.say(format!("{job} is running: stop it before deleting it"));
+                Vec::new()
+            }
             Action::Delete => {
                 self.confirm = Some(Confirm::Delete { job });
                 Vec::new()
@@ -897,12 +983,16 @@ mod tests {
     fn filled() -> App {
         let mut app = creating();
         typed(&mut app, "nightly");
-        app.act(Action::NextField);
-        app.act(Action::NextField);
+        on(&mut app, Focus::Workdir);
         typed(&mut app, "~/app");
-        app.act(Action::NextField);
+        on(&mut app, Focus::At);
         typed(&mut app, "02:00");
         app
+    }
+
+    /// Puts the focus of the form on a field.
+    fn on(app: &mut App, focus: Focus) {
+        app.form.as_mut().unwrap().focus = focus;
     }
 
     #[test]
@@ -975,11 +1065,36 @@ mod tests {
     fn save_with_a_bad_time_stays_on_the_form_with_the_reason() {
         let mut app = filled();
         typed(&mut app, "x");
+        on(&mut app, Focus::Args);
         assert_eq!(app.act(Action::Save), []);
         assert_eq!(app.screen, Screen::Form);
-        let notice = app.notice.as_ref().unwrap();
-        assert!(notice.error);
-        assert!(notice.text.contains("HH:MM"), "{}", notice.text);
+        let reason = app.reason.clone().unwrap();
+        assert!(reason.contains("HH:MM"), "{reason}");
+        // The focus goes to the field the reason names.
+        assert_eq!(app.form.as_ref().unwrap().focus, Focus::At);
+
+        // It stays through moving about, and goes when the job changes.
+        app.act(Action::NextField);
+        app.act(Action::Input(Edit::Left));
+        assert_eq!(app.reason.as_deref(), Some(reason.as_str()));
+        on(&mut app, Focus::At);
+        app.act(Action::Input(Edit::Backspace));
+        assert_eq!(app.reason, None);
+    }
+
+    #[test]
+    fn a_new_form_saved_empty_says_what_is_missing() {
+        let mut app = creating();
+        assert_eq!(app.act(Action::Save), []);
+        assert_eq!(app.screen, Screen::Form);
+        assert!(app.reason.as_deref().unwrap().contains("lowercase"));
+        assert_eq!(app.form.as_ref().unwrap().focus, Focus::Name);
+
+        let mut app = creating();
+        typed(&mut app, "nightly");
+        app.act(Action::Save);
+        assert_eq!(app.reason.as_deref(), Some("workdir is empty"));
+        assert_eq!(app.form.as_ref().unwrap().focus, Focus::Workdir);
     }
 
     #[test]
@@ -999,6 +1114,80 @@ mod tests {
         assert_eq!(app.screen, Screen::Jobs);
         assert!(app.form.is_none());
         assert_eq!(app.job.as_deref(), Some("nightly"));
+        // The list would show it with a next run: it is not scheduled yet.
+        assert_eq!(text(&app), "nightly saved; otto sync schedules it");
+        assert!(!app.notice.unwrap().error);
+    }
+
+    #[test]
+    fn a_deleted_job_still_has_its_unit_until_the_sync() {
+        let mut app = App::new(three());
+        app.deleted("alpha");
+        assert_eq!(text(&app), "alpha deleted; otto sync removes its unit");
+    }
+
+    #[test]
+    fn a_job_that_is_running_is_not_deleted() {
+        let mut app = App::new(alpha_with(vec![run("r1", Outcome::Running)]));
+        assert_eq!(app.act(Action::Delete), []);
+        assert_eq!(app.confirm, None);
+        assert_eq!(text(&app), "alpha is running: stop it before deleting it");
+    }
+
+    #[test]
+    fn a_question_about_a_job_that_vanished_is_dropped() {
+        let mut app = App::new(three());
+        app.act(Action::Delete);
+        app.refresh(snapshot(vec![job("beta"), job("gamma")]));
+        assert_eq!(app.confirm, None);
+    }
+
+    #[test]
+    fn the_form_of_a_job_that_vanished_closes_with_a_word() {
+        let mut app = App::new(alpha_with(vec![run("r1", Outcome::Ok)]));
+        app.act(Action::Open);
+        app.open_form(Ok(FILE.to_owned()), Some("alpha"));
+        app.refresh(snapshot(vec![job("beta")]));
+        assert_eq!(app.screen, Screen::Jobs);
+        assert!(app.form.is_none());
+        assert_eq!(text(&app), "alpha is no longer in the jobs file");
+        assert_eq!(app.job.as_deref(), Some("beta"));
+
+        // A new job is nobody's to vanish.
+        let mut app = creating();
+        app.refresh(Snapshot::default());
+        assert_eq!(app.screen, Screen::Form);
+    }
+
+    #[test]
+    fn pasted_text_goes_into_the_field_and_nowhere_else() {
+        let mut app = creating();
+        on(&mut app, Focus::Workdir);
+        let effects = app.paste("~/Work space/app\n--model y\r\nsonnet\u{7}");
+        let form = app.form.as_ref().unwrap();
+        // A line break is not a key: the focus stays, the breaks are spaces.
+        assert_eq!(form.focus, Focus::Workdir);
+        assert_eq!(form.workdir.text(), "~/Work space/app --model y sonnet");
+        assert_eq!(effects, [Effect::Check { spec: form.spec() }]);
+
+        // In the arguments a line is an argument.
+        on(&mut app, Focus::Args);
+        app.paste("--one\n--two");
+        assert_eq!(app.form.as_ref().unwrap().spec().args, ["--one", "--two"]);
+
+        // On a choice, and under a question, it is nothing.
+        on(&mut app, Focus::Days);
+        assert_eq!(app.paste("y y y"), []);
+        assert_eq!(app.form.as_ref().unwrap().days, [false; 7]);
+        app.act(Action::Back);
+        assert_eq!(app.confirm, Some(Confirm::Discard));
+        assert_eq!(app.paste("say yes"), []);
+        assert_eq!(app.confirm, Some(Confirm::Discard));
+        assert!(app.form.is_some());
+        // And on the list it starts nothing.
+        let mut list = App::new(three());
+        assert_eq!(list.paste("rxd"), []);
+        assert_eq!(list.confirm, None);
     }
 
     #[test]
@@ -1070,15 +1259,27 @@ mod tests {
     #[test]
     fn a_save_that_failed_keeps_the_form_unless_the_file_changed() {
         let mut app = filled();
-        app.save_failed("the disk is full".to_owned());
+        app.save_failed("the disk is full".to_owned(), false);
         assert_eq!(app.screen, Screen::Form);
         assert_eq!(text(&app), "the disk is full");
+        // A path that happens to hold those words is still only a path.
+        app.save_failed(
+            "cannot write /notes changed on disk/jobs.toml".to_owned(),
+            false,
+        );
+        assert_eq!(app.screen, Screen::Form);
 
         // What the form was built on is gone: it closes, and the list reloads.
-        app.save_failed("the jobs file changed on disk since it was read".to_owned());
+        app.save_failed(
+            "the jobs file changed on disk since it was read".to_owned(),
+            true,
+        );
         assert_eq!(app.screen, Screen::Jobs);
         assert!(app.form.is_none());
-        assert!(text(&app).contains("changed on disk"));
+        assert_eq!(
+            text(&app),
+            "not saved: the jobs file changed on disk meanwhile"
+        );
     }
 
     #[test]

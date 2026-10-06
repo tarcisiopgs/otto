@@ -47,6 +47,9 @@ impl JobSpec {
     }
 }
 
+/// What `save` says when the file is no longer the one that was read.
+pub const CHANGED: &str = "the jobs file changed on disk since it was read";
+
 /// A place in the text of the jobs file.
 type Span = Range<usize>;
 
@@ -69,6 +72,18 @@ fn valid(text: &str) -> Result<()> {
     Config::parse(text, Path::new("."), None)
         .map(drop)
         .context("the jobs file is not valid as it is")
+}
+
+/// What reading the file takes and otto still does not write: an empty path
+/// is read as the directory of the jobs file, which nobody means.
+fn written_out(spec: &JobSpec) -> Result<()> {
+    if spec.workdir.trim().is_empty() {
+        bail!("workdir is empty");
+    }
+    if spec.prompt.trim().is_empty() {
+        bail!("prompt is empty");
+    }
+    Ok(())
 }
 
 /// The same rules, applied to what would be written. Paths are not looked at.
@@ -402,6 +417,7 @@ pub fn add(text: &str, name: &str, spec: &JobSpec) -> Result<String> {
     if !config::is_job_name(name) {
         bail!("job name {name:?} must be lowercase letters, digits and dashes");
     }
+    written_out(spec)?;
     let (_, body) = without_mark(text);
     valid(body)?;
     let taken = parse(body)?
@@ -460,6 +476,7 @@ pub fn add(text: &str, name: &str, spec: &JobSpec) -> Result<String> {
 pub fn update(text: &str, name: &str, spec: &JobSpec) -> Result<String> {
     let (mark, text) = without_mark(text);
     let old = read(text, name)?;
+    written_out(spec)?;
     let doc = parse(text)?;
     let job = doc
         .get("jobs")
@@ -681,7 +698,7 @@ pub fn save(path: &Path, read: &str, text: &str) -> Result<()> {
         }
     };
     if on_disk != read {
-        bail!("the jobs file changed on disk since it was read");
+        bail!(CHANGED);
     }
     atomic::write(path, text)
 }
@@ -1478,6 +1495,40 @@ schedule = { at = \"07:00\", days = [\"mon\", \"tue\", \"wed\", \"thu\", \"fri\"
         let error = add(SAMPLE, "Bad Name", &nightly()).unwrap_err();
         assert!(format!("{error:#}").contains("lowercase"));
         assert!(add(SAMPLE, "", &nightly()).is_err());
+    }
+
+    /// Reading takes an empty path, which then means the directory of the
+    /// jobs file: a job nobody means to write.
+    #[test]
+    fn a_job_is_not_written_without_a_working_directory_or_a_prompt() {
+        for (spec, said) in [
+            (
+                JobSpec {
+                    workdir: String::new(),
+                    ..nightly()
+                },
+                "workdir is empty",
+            ),
+            (
+                JobSpec {
+                    workdir: "  ".to_owned(),
+                    ..nightly()
+                },
+                "workdir is empty",
+            ),
+            (
+                JobSpec {
+                    prompt: String::new(),
+                    ..nightly()
+                },
+                "prompt is empty",
+            ),
+        ] {
+            let error = add(SAMPLE, "nightly", &spec).unwrap_err();
+            assert!(format!("{error:#}").contains(said), "{error:#}");
+            let error = update(SAMPLE, "linear-updates", &spec).unwrap_err();
+            assert!(format!("{error:#}").contains(said), "{error:#}");
+        }
     }
 
     #[test]

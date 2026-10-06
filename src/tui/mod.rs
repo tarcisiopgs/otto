@@ -15,7 +15,7 @@ use anyhow::{Context as _, Result};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -39,7 +39,9 @@ pub fn run(world: &mut dyn World, now: &dyn Fn() -> Timestamp, zone: &TimeZone) 
             return Err(error).context("cannot take over the terminal");
         }
     };
+    paste_as_text(true);
     let result = watch(&mut terminal, world, now, zone);
+    paste_as_text(false);
     ratatui::restore();
     result
 }
@@ -68,15 +70,21 @@ fn watch(
             next_tick = Instant::now() + TICK;
             continue;
         }
-        // Anything but a key, a resize for one, only needs the redraw.
-        let Event::Key(key) = event::read().context("cannot read the terminal")? else {
-            continue;
+        let effects = match event::read().context("cannot read the terminal")? {
+            Event::Key(key) => match keys::action(key, &app) {
+                Some(action) => app.act(action),
+                None => continue,
+            },
+            // Pasted text comes whole, not as keys: a line break in it is
+            // not Enter, and a `y` is not an answer.
+            Event::Paste(text) => app.paste(&text),
+            // Anything else, a resize for one, only needs the redraw.
+            _ => continue,
         };
-        let Some(action) = keys::action(key, &app) else {
-            continue;
-        };
-        let effects = app.act(action);
-        let acted = !effects.is_empty();
+        // Asking what to warn about changes nothing on the machine.
+        let acted = effects
+            .iter()
+            .any(|effect| !matches!(effect, Effect::Check { .. }));
         for effect in effects {
             if effect == Effect::Quit {
                 return Ok(());
@@ -101,6 +109,7 @@ fn watch(
 /// Hands the terminal to another program as the shell left it: cursor shown
 /// (drawing hides it), cooked mode, the screen the user had before otto.
 fn suspend(terminal: &mut DefaultTerminal) -> io::Result<()> {
+    paste_as_text(false);
     terminal.show_cursor()?;
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)
@@ -111,7 +120,18 @@ fn suspend(terminal: &mut DefaultTerminal) -> io::Result<()> {
 fn resume(terminal: &mut DefaultTerminal) -> io::Result<()> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
+    paste_as_text(true);
     terminal.clear()
+}
+
+/// Asks the terminal to hand over pasted text as one piece, or to stop. One
+/// that cannot is left to send it as keys: nothing depends on the answer.
+fn paste_as_text(on: bool) {
+    let _ = if on {
+        execute!(io::stdout(), EnableBracketedPaste)
+    } else {
+        execute!(io::stdout(), DisableBracketedPaste)
+    };
 }
 
 /// Carries out an effect and tells the app how it went. Opening the editor
@@ -126,7 +146,14 @@ fn perform(effect: Effect, app: &mut App, world: &mut dyn World) -> Option<PathB
         Effect::Edit { path } => return Some(path),
         // The loop ends on this one before it gets here.
         Effect::Quit => {}
-        Effect::OpenForm { job } => app.open_form(world.text().map_err(told), job.as_deref()),
+        Effect::OpenForm { job } => {
+            app.open_form(world.text().map_err(told), job.as_deref());
+            // What a job would run into is worth knowing before it is touched.
+            if let Some(form) = &app.form {
+                let warnings = world.warnings(&form.spec());
+                app.show_warnings(warnings);
+            }
+        }
         Effect::Check { spec } => app.show_warnings(world.warnings(&spec)),
         Effect::Save {
             job,
@@ -134,14 +161,18 @@ fn perform(effect: Effect, app: &mut App, world: &mut dyn World) -> Option<PathB
             text,
             prompt,
         } => match world.save(&read, &text) {
-            Err(error) => app.save_failed(told(error)),
+            Err(error) => {
+                let changed = error.to_string() == jobs_file::CHANGED;
+                app.save_failed(told(error), changed);
+            }
             Ok(()) => {
                 app.saved(&job);
                 // A job with no prompt file would fail its first run: one
                 // that is missing is created and handed to the editor.
                 match world.ensure_prompt(&prompt) {
                     Ok(created) => return created,
-                    Err(error) => app.done(Err(told(error))),
+                    // The job is in the file all the same, and that is said.
+                    Err(error) => app.done(Err(format!("{job} was saved, but {}", told(error)))),
                 }
             }
         },
@@ -151,7 +182,10 @@ fn perform(effect: Effect, app: &mut App, world: &mut dyn World) -> Option<PathB
                 let text = jobs_file::remove(&read, &job)?;
                 world.save(&read, &text)
             });
-            app.done(removed.map_err(told));
+            match removed {
+                Ok(()) => app.deleted(&job),
+                Err(error) => app.done(Err(told(error))),
+            }
         }
     }
     None
@@ -380,6 +414,44 @@ mod tests {
     }
 
     #[test]
+    fn a_job_saved_without_its_prompt_file_says_both() {
+        let mut world = world();
+        let mut app = with_the_form(&mut world);
+        world.fail_on = Some("ensure_prompt".to_owned());
+        world.fail = Some("cannot create the prompt file".to_owned());
+        assert_eq!(perform(save(), &mut app, &mut world), None);
+        assert_eq!(app.screen, app::Screen::Jobs);
+        assert_eq!(
+            app.notice.map(|notice| notice.text),
+            Some("nightly was saved, but cannot create the prompt file".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_save_over_a_file_that_changed_closes_the_form() {
+        let mut world = world();
+        let mut app = with_the_form(&mut world);
+        world.fail = Some(jobs_file::CHANGED.to_owned());
+        perform(save(), &mut app, &mut world);
+        assert_eq!(app.screen, app::Screen::Jobs);
+        assert!(app.form.is_none());
+        assert!(app.notice.unwrap().text.starts_with("not saved:"));
+    }
+
+    #[test]
+    fn opening_the_form_says_at_once_what_to_warn_about() {
+        let mut world = world();
+        world.text = FILE.to_owned();
+        world.warnings = vec!["workdir not found".to_owned()];
+        let mut app = App::new(world.snapshot.clone());
+        let open = Effect::OpenForm {
+            job: Some("report".to_owned()),
+        };
+        perform(open, &mut app, &mut world);
+        assert_eq!(app.warnings, ["workdir not found"]);
+    }
+
+    #[test]
     fn a_prompt_file_just_created_opens_in_the_editor() {
         let mut world = world();
         world.created = Some("/etc/otto/prompts/nightly.md".into());
@@ -414,7 +486,9 @@ mod tests {
         };
         assert_eq!(perform(delete, &mut app, &mut world), None);
         assert_eq!(*world.calls.borrow(), ["text", "save "]);
-        assert_eq!(app.notice, None);
+        let notice = app.notice.clone().unwrap();
+        assert!(!notice.error);
+        assert_eq!(notice.text, "report deleted; otto sync removes its unit");
 
         // A job the file does not have is told, and nothing is written.
         world.calls.borrow_mut().clear();

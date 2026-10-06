@@ -13,11 +13,16 @@ pub fn action(key: KeyEvent, app: &App) -> Option<Action> {
     }
     // A key held with one of these is a shortcut of the terminal or of the
     // window manager, not the plain key.
-    let other = KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META;
-    if key.modifiers.intersects(other) {
+    let other = KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META;
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Control and alt together are AltGr, as Windows reports it: the key that
+    // types `@ \ { [ ~` on many keyboards. The character is what was typed.
+    let altgr = alt && control && matches!(key.code, KeyCode::Char(_));
+    if key.modifiers.intersects(other) || (alt && !altgr) {
         return None;
     }
-    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let control = control && !altgr;
     if app.confirm.is_some() {
         // Only `y` says yes: Enter is too easy to press for a question that
         // stops a run. Ctrl-C backs out of the question, not of otto.
@@ -240,6 +245,28 @@ mod tests {
         // Shift-tab arrives as a back-tab with shift held.
         let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
         assert_eq!(action(back, &app), Some(Action::PrevField));
+    }
+
+    /// AltGr, which some keyboards need for `@ \ { [ ~`, arrives on Windows
+    /// as control and alt held together.
+    #[test]
+    fn a_character_typed_with_altgr_is_that_character() {
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let app = on_the_form(Focus::Workdir);
+        for c in ['@', '\\', '{', '[', '~'] {
+            let key = KeyEvent::new(KeyCode::Char(c), altgr);
+            assert_eq!(
+                action(key, &app),
+                Some(Action::Input(Edit::Insert(c))),
+                "{c:?}"
+            );
+        }
+        // Alt alone is still a shortcut of the terminal, on the form too.
+        let alt = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
+        assert_eq!(action(alt, &app), None);
+        // And control alone does not type.
+        let control = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(action(control, &app), None);
     }
 
     #[test]

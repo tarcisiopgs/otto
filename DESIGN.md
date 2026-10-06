@@ -51,7 +51,7 @@ Two theme colours and two text modifiers, on the terminal's default foreground a
 
 There is no typeface: the terminal's font is the user's. Type is case and weight.
 
-- **Case:** lowercase throughout. The only capitals on screen are data (a path, an agent's output, `HH:MM` in an error from the parser), the key `G`, and `MiB`.
+- **Case:** lowercase throughout. The only capitals on screen are data (a path, an agent's output, `HH:MM` in an error from the parser), the keys `G` and `E`, and `MiB`.
 - **Weight:** default, DIM and BOLD, with the roles given under Colors. No italic, no underline, no reverse video.
 
 ### The words
@@ -97,7 +97,7 @@ None. There is no layer, overlay, popup or shadow; a question replaces the short
 
 ## Shapes
 
-Three line glyphs: `│` (margin rule), `├` and `─` (the rule that closes an entry). No corners, no boxes, no vertical rule anywhere but column 1. The remaining glyphs are the marks and `▸`.
+Three line glyphs: `│` (margin rule), `├` and `─` (the rule that closes an entry). No corners, no boxes, no vertical rule anywhere but column 1. The remaining glyphs are the marks, `▸`, and on the form `⏎` between two arguments, DIM.
 
 ### The marks
 
@@ -106,6 +106,8 @@ Three line glyphs: `│` (margin rule), `├` and `─` (the rule that closes an
 | `✓` | ok | default |
 | `✗` | failed | red |
 | `·` | did not start the agent (skipped, paused) | DIM |
+
+On the form `✓` and `·` say the same of a choice: this one is taken, this one is not.
 | `!` | interrupted | red |
 | `●` | running | yellow |
 
@@ -157,11 +159,11 @@ The last row: key (BOLD), a space, one word (DIM), two spaces.
 | job | `enter log` `r run` or `x stop` `p pause` `s skip` `u resume` `e prompt` `E edit` `d delete` | `esc back` `? help` |
 | log | `↑↓ scroll` `g top` `G end` | `esc back` `? help` |
 | help | | `esc back` `q quit` |
-| form | `tab next` `space mark` | `ctrl-s save` `esc cancel` |
+| form | `tab next`, then what the field takes: `←→ move` `space mark` on a choice, `enter next argument` on `args` | `ctrl-s save` `esc cancel` |
 
 The way back and the way to the help or the way out never leave the bar. An action that does not fit is left out whole; it still works and the help lists it.
 
-The bar offers what would do something: `x stop` for a job that is running and `r run` for one that is not, never both.
+The bar offers what would do something: `x stop` for a job that is running and `r run` for one that is not, never both; `p pause` and `s skip` for a job they would change, `u resume` for one that is paused or skipping.
 
 Width is counted in columns, not characters (`src/tui/text.rs`): a CJK character takes two. A name too long for its place is cut with `…`, in the header and in the question too, so what sits at the right edge stays there.
 
@@ -188,11 +190,11 @@ Two columns that fit the eight body rows of the smallest terminal: the action ke
 | `G` `end` | last (on the log, follow the end again) | same |
 | `enter` | open the job; then open the output of the selected run | jobs, job |
 | `esc` | back | job, log, help |
-| `?` | help | everywhere |
+| `?` | help | everywhere but the form, where it is text |
 | `n` | new job | jobs |
 | `E` | edit the job | jobs, job |
 | `d` | delete the job, after a question | jobs, job |
-| `q` `ctrl-c` | quit | everywhere |
+| `q` `ctrl-c` | quit | everywhere but the form: `q` is text there and `ctrl-c` leaves it |
 | `tab` `↓` `enter` | next field (`enter` breaks a line in `args`) | form |
 | `shift-tab` `↑` | previous field | form |
 | `space` | mark the agent or the day | form, on a choice |
@@ -208,15 +210,16 @@ Two columns that fit the eight body rows of the smallest terminal: the action ke
 | `n` `esc` `ctrl-c` | no | question |
 
 ### Job form
-One opened entry, with a fact to a field: `name`, `agent`, `workdir`, `at`, `days`, `args`, `prompt`, then the rule. The header reads `new job` or `edit <name>`.
+One opened entry, with a fact to a field, in the order an entry reads: `name`, `agent`, `at`, `days`, then `workdir`, `prompt`, `args` as on the job screen, then the rule. The header reads `new job` or `edit <name>`.
 
 - **A field** is ` │ `, a DIM label in 9 columns, and the value in the default foreground from column 12. The field in focus is the selection: `▸` in column 0, in place of the space before the rule, and its label BOLD.
-- **The cursor** is the terminal's own, on the field in focus: where the next character goes, or on the choice `space` would mark. It is not shown while a question waits.
-- **A choice** (`agent`, `days`) lists every option: the chosen ones `✓name` with the name BOLD, the others `·name` DIM. No day chosen means every day.
-- **A text wider than its room** shows the part the cursor is in, with `…` where it was cut. The arguments are one to a line and are shown on one row, ` ⏎ ` between them.
+- **The cursor** is the terminal's own, on the field in focus: where the next character goes, on the day `space` would mark, or on the agent that is chosen (`space` takes the next one). It is not shown while a question waits.
+- **A choice** (`agent`, `days`) lists every option: the chosen ones `✓name` with the name BOLD, the others `·name` DIM. No day chosen means every day, and the row says so in the list's word: it ends in a DIM `daily`.
+- **A text wider than its room** shows the part the cursor is in, with `…` at each end that was cut. The arguments are one to a line and are shown on one row, a DIM ` ⏎ ` between them. Arguments the field cannot hold (one with a line break, with a space at an end, or empty) are not shown as if it could: the row reads `written by hand in the jobs file`, DIM, and takes no typing.
 - **The name of a job that exists** is DIM: it is shown, not offered.
-- **The notice row**, with nothing else to tell, says what the field in focus calls for (on `args`: `a scheduled run has nobody to answer a permission prompt`) or, failing that, what saving would run into, led by `note:` and never by `!`: a note does not stop the save. Why a job could not be saved is an error notice, red, in the words of the jobs file.
-- **Every letter is text** on this screen. Its shortcut bar is `tab next` `space mark` and, always, `ctrl-s save` `esc cancel`.
+- **The notice row** says, in this order: why the job could not be saved, red, in the words of the jobs file, and it stays until the job changes while the focus goes to the field it names; on `args`, `a scheduled run has nobody to answer a permission prompt`, which is never out of sight there; what saving would run into, led by `note:` and never by `!`, since a note does not stop the save, and without the path the row above already shows (`note: workdir not found; codex not found in PATH`); and what the field in focus calls for (`24-hour time, as in 16:05`).
+- **Every letter is text** on this screen. Its shortcut bar is `tab next`, the keys the field in focus takes besides text, and always `ctrl-s save` `esc cancel`. Text pasted into the terminal goes into the field as text: a line break in it is not `enter`.
+- **After a save or a delete** the list says what is still to do, in the default foreground: `nightly saved; otto sync schedules it`. The list shows a job with a next run whether or not it has a unit.
 - **Leaving a form that changed** is a question: `discard the changes?  y discard  n keep editing`. Deleting a job is one too: `delete <name>?  y delete  n keep`.
 
 ### Screens not drawn yet
@@ -236,7 +239,7 @@ The sync preview is not built. Nothing below is observed; it is what the rules a
 - **Do** name the action or the place on every control (`y stop`, `enter log`), never `ok`, `yes` or `confirm`.
 - **Do** make an error name the problem and the way out (`showing the last valid read; fix the file to reload`).
 - **Do** write screen text in English.
-- **Do** keep the way back and the way to the help in the shortcut bar at every width.
+- **Do** keep the way back and the way to the help in the shortcut bar at every width. The form is the exception: `?` is text there, so its bar keeps `ctrl-s save` and `esc cancel`, and says what each field takes.
 
 ### Don't:
 - **Don't** draw a box, a border or a pane, or split a screen into a list and its detail.

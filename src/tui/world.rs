@@ -305,9 +305,9 @@ impl World for Real {
         let mut warnings = Vec::new();
         let workdir = self.resolved(&spec.workdir);
         if !spec.workdir.is_empty() && !workdir.is_dir() {
-            // As it was typed: the line this is shown on is short, and the
-            // end of a path, which says the most, is what a long one loses.
-            warnings.push(format!("working directory not found: {}", spec.workdir));
+            // Without the path: the form shows it on the row above, and the
+            // line this goes on is too short for it and a second note.
+            warnings.push("workdir not found".to_owned());
         }
         let program = spec.agent.program();
         let on_the_path = self
@@ -461,6 +461,8 @@ pub struct Fake {
     pub log: Log,
     /// When set, everything that can fail fails with this message.
     pub fail: Option<String>,
+    /// When set as well, only the call whose line starts with this fails.
+    pub fail_on: Option<String>,
     pub calls: std::cell::RefCell<Vec<String>>,
     /// The jobs file as `text` gives it.
     pub text: String,
@@ -472,10 +474,14 @@ pub struct Fake {
 #[cfg(test)]
 impl Fake {
     fn call(&self, line: String) -> Result<()> {
+        let chosen = self
+            .fail_on
+            .as_deref()
+            .is_none_or(|start| line.starts_with(start));
         self.calls.borrow_mut().push(line);
         match &self.fail {
-            Some(message) => bail!("{message}"),
-            None => Ok(()),
+            Some(message) if chosen => bail!("{message}"),
+            _ => Ok(()),
         }
     }
 }
@@ -703,8 +709,7 @@ schedule = { at = \"07:00\" }
         assert_eq!(
             warnings,
             [
-                // In the user's own words: the line it is shown on is short.
-                "working directory not found: not-there".to_owned(),
+                "workdir not found".to_owned(),
                 "claude not found in PATH".to_owned(),
             ]
         );
