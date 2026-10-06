@@ -153,10 +153,11 @@ The last row: key (BOLD), a space, one word (DIM), two spaces.
 
 | Screen | Yields, rightmost first | Never leaves |
 | --- | --- | --- |
-| jobs | `enter open` `r run` or `x stop` `p pause` `s skip` `u resume` `e prompt` | `? help` `q quit` |
-| job | `enter log` `r run` or `x stop` `p pause` `s skip` `u resume` `e prompt` | `esc back` `? help` |
+| jobs | `enter open` `r run` or `x stop` `p pause` `s skip` `u resume` `e prompt` `n new` `E edit` `d delete`; with no job yet, only `n new` | `? help` `q quit` |
+| job | `enter log` `r run` or `x stop` `p pause` `s skip` `u resume` `e prompt` `E edit` `d delete` | `esc back` `? help` |
 | log | `↑↓ scroll` `g top` `G end` | `esc back` `? help` |
 | help | | `esc back` `q quit` |
+| form | `tab next` `space mark` | `ctrl-s save` `esc cancel` |
 
 The way back and the way to the help or the way out never leave the bar. An action that does not fit is left out whole; it still works and the help lists it.
 
@@ -188,7 +189,15 @@ Two columns that fit the eight body rows of the smallest terminal: the action ke
 | `enter` | open the job; then open the output of the selected run | jobs, job |
 | `esc` | back | job, log, help |
 | `?` | help | everywhere |
+| `n` | new job | jobs |
+| `E` | edit the job | jobs, job |
+| `d` | delete the job, after a question | jobs, job |
 | `q` `ctrl-c` | quit | everywhere |
+| `tab` `↓` `enter` | next field (`enter` breaks a line in `args`) | form |
+| `shift-tab` `↑` | previous field | form |
+| `space` | mark the agent or the day | form, on a choice |
+| `ctrl-s` | save | form |
+| `esc` `ctrl-c` | leave the form | form |
 | `r` | run the job now | jobs, job |
 | `x` | stop the run in progress (asks first) | jobs, job |
 | `p` | pause the schedule | jobs, job |
@@ -198,11 +207,22 @@ Two columns that fit the eight body rows of the smallest terminal: the action ke
 | `y` | yes | question |
 | `n` `esc` `ctrl-c` | no | question |
 
+### Job form
+One opened entry, with a fact to a field: `name`, `agent`, `workdir`, `at`, `days`, `args`, `prompt`, then the rule. The header reads `new job` or `edit <name>`.
+
+- **A field** is ` │ `, a DIM label in 9 columns, and the value in the default foreground from column 12. The field in focus is the selection: `▸` in column 0, in place of the space before the rule, and its label BOLD.
+- **The cursor** is the terminal's own, on the field in focus: where the next character goes, or on the choice `space` would mark. It is not shown while a question waits.
+- **A choice** (`agent`, `days`) lists every option: the chosen ones `✓name` with the name BOLD, the others `·name` DIM. No day chosen means every day.
+- **A text wider than its room** shows the part the cursor is in, with `…` where it was cut. The arguments are one to a line and are shown on one row, ` ⏎ ` between them.
+- **The name of a job that exists** is DIM: it is shown, not offered.
+- **The notice row**, with nothing else to tell, says what the field in focus calls for (on `args`: `a scheduled run has nobody to answer a permission prompt`) or, failing that, what saving would run into, led by `note:` and never by `!`: a note does not stop the save. Why a job could not be saved is an error notice, red, in the words of the jobs file.
+- **Every letter is text** on this screen. Its shortcut bar is `tab next` `space mark` and, always, `ctrl-s save` `esc cancel`.
+- **Leaving a form that changed** is a question: `discard the changes?  y discard  n keep editing`. Deleting a job is one too: `delete <name>?  y delete  n keep`.
+
 ### Screens not drawn yet
 
-The job form and the sync preview are not built. Nothing below is observed; it is what the rules above already decide for them.
+The sync preview is not built. Nothing below is observed; it is what the rules above already decide for it.
 
-- **Job form:** one opened entry. Each field is a fact behind ` │ `: DIM label in a fixed column, value in the default foreground. The field being edited is the selection: `▸` in column 0 and its label BOLD. A validation problem is red and names the problem and the recovery, in the words the jobs file error already uses (`schedule.at must be HH:MM, got "25:00"`). The built system has no treatment for a warning: it is default foreground, never yellow, never red, never led by `!`, and it needs a word of its own to be told from a problem. The key map has no text entry: while a field takes text, the single-letter keys are text, and that screen's shortcut bar must say so with the keys that remain.
 - **Sync preview:** one entry per job, the action where the state sits, right-aligned on the first line; the reason for an error behind ` │ `. `otto sync` already reports `added`, `updated`, `removed`, `unchanged`, `busy` and `error`; the preview uses the same stems. `error` is red; the others are told apart by the word. Applying it is a question in the shortcut bar, named after the action, answered with `y` and `n`.
 
 ## Do's and Don'ts

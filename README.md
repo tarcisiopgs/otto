@@ -99,6 +99,8 @@ otto log linear-updates <run-id>   # the output of one run
 | `e` | edit the prompt in `$VISUAL` or `$EDITOR`; the value may carry arguments (`code -w`) and quotes around a path with a space |
 | `↑` `↓` `k` `j` `pgup` `pgdn` `g` `G` | move |
 | `?` | every key |
+| `n` | create a job |
+| `E` `d` | edit the selected job, delete it; `y` confirms the delete |
 | `q` | quit |
 
 A run started from the screen does not belong to it: it keeps going after you quit, and shows as running when you open otto again. The screen follows the output of a run in progress and loads the last 1 MiB of a long one; `otto log` prints all of it. Colours and other terminal escapes in the output are left out, and a progress line that rewrites itself shows where it ended.
@@ -106,6 +108,20 @@ A run started from the screen does not belong to it: it keeps going after you qu
 Stopping a run ends the agent and everything it started. otto first checks that the process the record names is still that run, since a record left open by a crash can name a process id the system has given to something else, and refuses when it is not. It also refuses when it cannot end the run as a whole, which is the case for a process that does not lead its own process group. A stopped run is recorded as `interrupted`.
 
 The next run is otto's own reading of the schedule, not something it asks the OS scheduler. On the two days a year the clocks change, a time that does not exist or happens twice may fire at a different moment than the screen says.
+
+### Creating and editing a job
+
+`n` opens a form for a new job and `E` opens it on the selected one: name, agent, working directory, time, days, arguments (one to a line) and the prompt file. `tab` moves between the fields, `space` marks an agent or a day, `ctrl-s` saves and `esc` leaves; every letter is text there, so the single-letter keys of the other screens do not apply.
+
+Saving writes `jobs.toml`, and only what changed in it: your comments, the order of the jobs and the layout of the file stay as they were. A job that cannot be saved says why in the words the jobs file is read with. A working directory that is not there, or an agent that is not on the `PATH`, is a note and does not stop the save, since `otto sync` checks both. If the file changed on disk while the form was open, the save is refused and the list is read again.
+
+A new job gets `prompts/<name>.md` beside the jobs file as its prompt, unless you type another path. A prompt file that does not exist is created and opened in your editor. The name of a job cannot be changed afterwards: it is what its history and its scheduler unit are kept under.
+
+No day marked means every day. The arguments start empty and otto suggests none: a scheduled run has nobody to answer a permission prompt, and what the agent may do is yours to write.
+
+`d` removes the job from `jobs.toml` after asking. Its prompt file and its history stay on disk.
+
+**A job created, edited or deleted here is not scheduled until `otto sync`**, the same as after editing the file by hand.
 
 The screen needs a terminal of at least 60 columns by 12 rows. Where there is no terminal (a pipe, a script), `otto` alone prints the help and exits with 2. It uses your terminal's own colours and background.
 
@@ -171,7 +187,7 @@ Requires Rust 1.88 or newer.
 
 - Notifications when a run starts, finishes, fails or is skipped.
 - Prechecks (a command that decides whether today's run happens) and a missed-run grace window.
-- Creating, editing and deleting a job from the terminal UI, and reviewing and applying the sync there.
+- Reviewing and applying the sync from the terminal UI.
 - Windows out of experimental, with Scoop and winget packages.
 
 ## License

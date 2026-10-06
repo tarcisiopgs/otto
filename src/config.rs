@@ -176,7 +176,9 @@ pub fn is_job_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-fn resolve(path: &Path, base: &Path, home: Option<&Path>) -> PathBuf {
+/// A path of the jobs file as a run sees it: `~/` is the home directory,
+/// and a relative path starts where the jobs file is.
+pub fn resolve(path: &Path, base: &Path, home: Option<&Path>) -> PathBuf {
     if let (Ok(rest), Some(home)) = (path.strip_prefix("~"), home) {
         return home.join(rest);
     }

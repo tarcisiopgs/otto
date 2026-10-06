@@ -2,7 +2,8 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::tui::app::{Action, App};
+use crate::tui::app::{Action, App, Screen};
+use crate::tui::form::{Edit, Focus};
 
 /// The action a key asks for on the screen the app is showing.
 pub fn action(key: KeyEvent, app: &App) -> Option<Action> {
@@ -28,6 +29,9 @@ pub fn action(key: KeyEvent, app: &App) -> Option<Action> {
             _ => None,
         };
     }
+    if app.screen == Screen::Form {
+        return on_the_form(key, control, app);
+    }
     if control {
         return (key.code == KeyCode::Char('c')).then_some(Action::Quit);
     }
@@ -48,6 +52,40 @@ pub fn action(key: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('s') => Action::Skip,
         KeyCode::Char('u') => Action::Resume,
         KeyCode::Char('e') => Action::EditPrompt,
+        KeyCode::Char('n') => Action::New,
+        KeyCode::Char('E') => Action::EditJob,
+        KeyCode::Char('d') => Action::Delete,
+        _ => return None,
+    })
+}
+
+/// The keys of the form. While a field takes text every letter is text, so
+/// what the other screens do with one key is done here with control or with
+/// a key that types nothing.
+fn on_the_form(key: KeyEvent, control: bool, app: &App) -> Option<Action> {
+    let focus = app.form.as_ref().map(|form| form.focus);
+    if control {
+        return match key.code {
+            KeyCode::Char('s') => Some(Action::Save),
+            KeyCode::Char('c') => Some(Action::Back),
+            _ => None,
+        };
+    }
+    Some(match key.code {
+        KeyCode::Esc => Action::Back,
+        KeyCode::Tab | KeyCode::Down => Action::NextField,
+        KeyCode::BackTab | KeyCode::Up => Action::PrevField,
+        // The arguments are one to a line; anywhere else Enter moves on.
+        KeyCode::Enter if focus == Some(Focus::Args) => Action::Input(Edit::Insert('\n')),
+        KeyCode::Enter => Action::NextField,
+        KeyCode::Char(' ') if matches!(focus, Some(Focus::Agent | Focus::Days)) => Action::Toggle,
+        KeyCode::Char(c) => Action::Input(Edit::Insert(c)),
+        KeyCode::Backspace => Action::Input(Edit::Backspace),
+        KeyCode::Delete => Action::Input(Edit::Delete),
+        KeyCode::Left => Action::Input(Edit::Left),
+        KeyCode::Right => Action::Input(Edit::Right),
+        KeyCode::Home => Action::Input(Edit::Home),
+        KeyCode::End => Action::Input(Edit::End),
         _ => return None,
     })
 }
@@ -58,6 +96,7 @@ mod tests {
 
     use super::*;
     use crate::store::{Outcome, Run, State, Trigger};
+    use crate::tui::form::{Edit, Focus};
     use crate::tui::world::{JobView, Snapshot};
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -134,6 +173,89 @@ mod tests {
         // Shift is how `G` is typed.
         let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
         assert_eq!(action(key, &running()), Some(Action::Bottom));
+    }
+
+    #[test]
+    fn the_job_list_has_keys_to_create_edit_and_delete() {
+        let app = running();
+        assert_eq!(action(press(KeyCode::Char('n')), &app), Some(Action::New));
+        assert_eq!(
+            action(press(KeyCode::Char('E')), &app),
+            Some(Action::EditJob)
+        );
+        assert_eq!(
+            action(press(KeyCode::Char('d')), &app),
+            Some(Action::Delete)
+        );
+    }
+
+    fn on_the_form(focus: Focus) -> App {
+        let mut app = running();
+        app.open_form(Ok(String::new()), None);
+        app.form.as_mut().unwrap().focus = focus;
+        app
+    }
+
+    #[test]
+    fn on_the_form_the_letters_are_text() {
+        let app = on_the_form(Focus::Workdir);
+        for c in ['q', 'r', 'x', 'n', 'E', 'd', '?', 'j', 'k', 'g', ' ', 'ã'] {
+            assert_eq!(
+                action(press(KeyCode::Char(c)), &app),
+                Some(Action::Input(Edit::Insert(c))),
+                "{c:?}"
+            );
+        }
+        // A capital comes with shift held.
+        let shifted = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
+        assert_eq!(
+            action(shifted, &app),
+            Some(Action::Input(Edit::Insert('A')))
+        );
+    }
+
+    #[test]
+    fn the_form_has_its_own_keys() {
+        let app = on_the_form(Focus::Workdir);
+        for (code, expected) in [
+            (KeyCode::Tab, Action::NextField),
+            (KeyCode::Down, Action::NextField),
+            (KeyCode::Enter, Action::NextField),
+            (KeyCode::BackTab, Action::PrevField),
+            (KeyCode::Up, Action::PrevField),
+            (KeyCode::Esc, Action::Back),
+            (KeyCode::Backspace, Action::Input(Edit::Backspace)),
+            (KeyCode::Delete, Action::Input(Edit::Delete)),
+            (KeyCode::Left, Action::Input(Edit::Left)),
+            (KeyCode::Right, Action::Input(Edit::Right)),
+            (KeyCode::Home, Action::Input(Edit::Home)),
+            (KeyCode::End, Action::Input(Edit::End)),
+        ] {
+            assert_eq!(action(press(code), &app), Some(expected), "{code:?}");
+        }
+        let save = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(action(save, &app), Some(Action::Save));
+        let leave = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(action(leave, &app), Some(Action::Back));
+        // Shift-tab arrives as a back-tab with shift held.
+        let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(action(back, &app), Some(Action::PrevField));
+    }
+
+    #[test]
+    fn space_marks_a_choice_and_enter_breaks_a_line_of_arguments() {
+        for focus in [Focus::Agent, Focus::Days] {
+            let app = on_the_form(focus);
+            assert_eq!(
+                action(press(KeyCode::Char(' ')), &app),
+                Some(Action::Toggle)
+            );
+        }
+        let args = on_the_form(Focus::Args);
+        assert_eq!(
+            action(press(KeyCode::Enter), &args),
+            Some(Action::Input(Edit::Insert('\n')))
+        );
     }
 
     #[test]
