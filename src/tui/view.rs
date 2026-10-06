@@ -899,7 +899,11 @@ fn bar(app: &App, width: usize) -> Line<'_> {
                 Some(Focus::Agent | Focus::Days) => {
                     keys.extend([("←→", "move"), ("space", "mark")])
                 }
-                Some(Focus::Args) => keys.push(("enter", "next argument")),
+                // A line of its own for the next argument, where the field
+                // takes typing at all.
+                Some(Focus::Args) if !app.form.as_ref().is_some_and(|form| form.args_by_hand) => {
+                    keys.push(("enter", "line"));
+                }
                 _ => {}
             }
             (keys, [("ctrl-s", "save"), ("esc", "cancel")])
@@ -1763,10 +1767,7 @@ mod tests {
             " tab next  ←→ move  space mark  ctrl-s save  esc cancel"
         );
         on(&mut app, Focus::Args);
-        assert_eq!(
-            bar(&app),
-            " tab next  enter next argument  ctrl-s save  esc cancel"
-        );
+        assert_eq!(bar(&app), " tab next  enter line  ctrl-s save  esc cancel");
     }
 
     #[test]
@@ -1891,6 +1892,11 @@ mod tests {
             "{shown}"
         );
         assert!(shown.contains(" these arguments can only be changed in the jobs file"));
+        // A key that would do nothing there is not offered.
+        assert!(
+            shown.contains(" tab next  ctrl-s save  esc cancel"),
+            "{shown}"
+        );
         assert!(!shown.contains("padded"));
     }
 

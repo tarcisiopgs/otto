@@ -371,7 +371,8 @@ impl App {
     pub fn save_failed(&mut self, text: String, changed: bool) {
         let text = if changed {
             self.close_form();
-            "not saved: the jobs file changed on disk meanwhile".to_owned()
+            // What to do about it goes with what happened.
+            "not saved: the jobs file changed; open the form again".to_owned()
         } else {
             text
         };
@@ -1278,7 +1279,7 @@ mod tests {
         assert!(app.form.is_none());
         assert_eq!(
             text(&app),
-            "not saved: the jobs file changed on disk meanwhile"
+            "not saved: the jobs file changed; open the form again"
         );
     }
 

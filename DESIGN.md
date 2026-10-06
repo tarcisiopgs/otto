@@ -106,10 +106,10 @@ Three line glyphs: `│` (margin rule), `├` and `─` (the rule that closes an
 | `✓` | ok | default |
 | `✗` | failed | red |
 | `·` | did not start the agent (skipped, paused) | DIM |
-
-On the form `✓` and `·` say the same of a choice: this one is taken, this one is not.
 | `!` | interrupted | red |
 | `●` | running | yellow |
+
+On the form `✓` and `·` say the same of a choice: this one is taken, this one is not.
 
 ## Components
 
@@ -159,7 +159,7 @@ The last row: key (BOLD), a space, one word (DIM), two spaces.
 | job | `enter log` `r run` or `x stop` `p pause` `s skip` `u resume` `e prompt` `E edit` `d delete` | `esc back` `? help` |
 | log | `↑↓ scroll` `g top` `G end` | `esc back` `? help` |
 | help | | `esc back` `q quit` |
-| form | `tab next`, then what the field takes: `←→ move` `space mark` on a choice, `enter next argument` on `args` | `ctrl-s save` `esc cancel` |
+| form | `tab next`, then what the field takes: `←→ move` `space mark` on a choice, `enter line` on `args`, one argument to a line | `ctrl-s save` `esc cancel` |
 
 The way back and the way to the help or the way out never leave the bar. An action that does not fit is left out whole; it still works and the help lists it.
 
