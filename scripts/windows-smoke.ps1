@@ -74,6 +74,11 @@ Write-Host 'The Windows backend registered, ran, updated and removed a job.'
 # An agent CLI installed through npm is a `.cmd`, which Windows runs through
 # cmd.exe, and cmd.exe cannot be handed an argument with a line break. The
 # README states this limit; this pins it, and that the run says why it failed.
+# The three files npm really leaves: a shell script with no extension, the
+# `.cmd` and a `.ps1`. Windows cannot start the first; the `.cmd` must be the
+# one found.
+Set-Content "$work\bin\codex" "#!/bin/sh`necho not for Windows"
+Set-Content "$work\bin\codex.ps1" 'Write-Host not this one'
 Set-Content "$work\bin\codex.cmd" "@echo off`r`necho fake codex got: %*"
 Set-Content $config @"
 [jobs.batch]

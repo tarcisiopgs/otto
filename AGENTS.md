@@ -20,7 +20,7 @@ cargo run -- --config examples/jobs.toml list
 cargo run -- --config examples/jobs.toml plan linear-updates
 ```
 
-CI (`.github/workflows/ci.yml`) runs Lint (macOS and Windows), Test (macOS, Linux and Windows), Build and `Windows Task Scheduler` for every pull request. The `check` job passes only when all of them pass.
+CI (`.github/workflows/ci.yml`) runs Lint (macOS and Windows), Test (macOS, Linux and Windows), Build (every release target, with the steps `release.yml` uses, since that workflow only runs on a release) and `Windows Task Scheduler` for every pull request. The `check` job passes only when all of them pass.
 
 `Windows Task Scheduler` is the only place the Windows backend really runs: `scripts/windows-smoke.ps1` does a real `otto sync` on the runner, starts the task and reads its record back. There is no Windows machine to try a change on, so a change to `src/scheduler/windows.rs`, `src/which.rs` or how a run starts is not verified until that job passes.
 

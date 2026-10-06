@@ -1,7 +1,6 @@
 //! One run of a job: decide whether it happens, start the agent, keep its
 //! output and close the record.
 
-use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -15,7 +14,6 @@ use jiff::Timestamp;
 
 use crate::scheduler::runner::Runner;
 use crate::store::{Outcome, State, Store, Trigger};
-use crate::which;
 
 pub struct Request<'a> {
     pub job: &'a str,
@@ -99,14 +97,7 @@ fn start(request: &Request, argv: &[String], log: &Path) -> Result<ExitStatus> {
         bail!("working directory not found: {}", request.workdir.display());
     }
     let file = File::create(log).with_context(|| format!("cannot write {}", log.display()))?;
-    // Looked up here because Windows only finds a bare name when the file is an
-    // `.exe`, and an agent CLI is often a `.cmd`. A name that is not found is
-    // left to the system, which reports it.
-    let found = env::var_os("PATH").and_then(|path| which::find(program, &path));
-    let mut command = match &found {
-        Some(file) => Command::new(file),
-        None => Command::new(program),
-    };
+    let mut command = command_for(program);
     // No terminal is attached on a scheduled run, so the agent gets no stdin.
     command
         .args(args)
@@ -162,6 +153,26 @@ fn start(request: &Request, argv: &[String], log: &Path) -> Result<ExitStatus> {
         }
     }
     Ok(status)
+}
+
+/// The command that starts `program`. Windows only finds a bare name when the
+/// file is an `.exe`, and an agent CLI is often a `.cmd`, so the file is
+/// looked up here first. A name that is not found is left to the system,
+/// which reports it.
+#[cfg(windows)]
+fn command_for(program: &str) -> Command {
+    let found = std::env::var_os("PATH").and_then(|path| crate::which::find(program, &path));
+    match found {
+        Some(file) => Command::new(file),
+        None => Command::new(program),
+    }
+}
+
+/// Everywhere else the system's own lookup is the one to trust: it runs after
+/// the working directory changes and skips a file it may not execute.
+#[cfg(not(windows))]
+fn command_for(program: &str) -> Command {
+    Command::new(program)
 }
 
 /// How long a manual run waits for its output to drain after the agent exits.

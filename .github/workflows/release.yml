@@ -1,7 +1,7 @@
 name: Release
 
 # Publishing a GitHub Release (e.g. `gh release create v0.2.0 --generate-notes`)
-# builds the macOS and Linux binaries, attaches them to the release and publishes
+# builds the macOS, Linux and Windows binaries, attaches them to the release and publishes
 # the npm package through trusted publishing (OIDC). npm trusts this file by name.
 on:
   release:
@@ -16,6 +16,9 @@ jobs:
     permissions:
       contents: write
     strategy:
+      # One target failing must not cancel the others before they attach their
+      # archives.
+      fail-fast: false
       matrix:
         include:
           - { target: aarch64-apple-darwin, os: macos-latest }
@@ -41,7 +44,8 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Check the tag matches Cargo.toml
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          # jq writes CRLF on Windows, and bash keeps the carriage return.
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version' | tr -d '\r')
           if [ "v$version" != "$TAG" ]; then
             echo "::error::Release tag $TAG does not match Cargo.toml version $version"
             exit 1
