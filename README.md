@@ -44,6 +44,8 @@ The jobs file you sync is the whole list: syncing a different file with `--confi
 
 Each job runs with the `PATH` of the terminal you ran `otto sync` from, since the OS scheduler starts with a bare one and would not find the agent CLI. Run `otto sync` again if your `PATH` changes.
 
+Reloading or removing a job stops a run of it that is in progress. The `PATH` is part of what otto compares, so a sync from a terminal with a different `PATH` reloads every job: check with `otto sync --dry-run` first when jobs may be running.
+
 Before scheduling a job, otto checks that its prompt file and working directory exist and that the agent CLI is on the `PATH`. A job that fails the check is reported and left as it was.
 
 The output of every scheduled run is appended to `~/.local/state/otto/logs/<job>.log` (`$XDG_STATE_HOME/otto/logs` when that is set).

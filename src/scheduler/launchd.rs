@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 
 use super::runner::{Runner, must};
-use super::{Context, Scheduler, Unit, file_names, remove_unit, write_units};
+use super::{Context, PREFIX, Scheduler, Unit, file_names, remove_unit, write_units};
 use crate::config::{Job, home_dir, is_job_name};
 
 /// macOS: one LaunchAgent per job, in the user's GUI session so the agent CLI
@@ -22,9 +22,6 @@ impl Launchd {
         })
     }
 }
-
-/// Every LaunchAgent with this prefix belongs to otto.
-const PREFIX: &str = "io.github.tarcisiopgs.otto.";
 
 /// How long `unload` waits for launchd to finish tearing a job down.
 const GONE_ATTEMPTS: u32 = 50;

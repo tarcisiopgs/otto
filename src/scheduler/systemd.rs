@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::env;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Result, bail};
 
 use super::runner::{Runner, must};
-use super::{Context, Scheduler, Unit, file_names, remove_unit, write_units};
+use super::{Context, PREFIX, Scheduler, Unit, file_names, remove_unit, write_units};
 use crate::config::{Job, home_dir, is_job_name};
 
 /// Linux: a user service plus a timer per job.
@@ -13,15 +14,23 @@ pub struct Systemd {
 
 impl Systemd {
     pub fn for_user() -> Result<Systemd> {
-        let home = home_dir().context("cannot find the home directory")?;
+        let xdg_config = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
         Ok(Systemd {
-            units_dir: home.join(".config").join("systemd").join("user"),
+            units_dir: Systemd::dir_from(xdg_config.as_deref(), home_dir().as_deref())?,
         })
     }
-}
 
-/// Every user unit with this prefix belongs to otto.
-const PREFIX: &str = "otto-";
+    /// Where systemd looks for the user's own units: `<xdg_config>/systemd/user`,
+    /// falling back to `<home>/.config/systemd/user`.
+    fn dir_from(xdg_config: Option<&Path>, home: Option<&Path>) -> Result<PathBuf> {
+        let config = match (xdg_config, home) {
+            (Some(dir), _) => dir.to_path_buf(),
+            (None, Some(home)) => home.join(".config"),
+            (None, None) => bail!("cannot find the home directory"),
+        };
+        Ok(config.join("systemd").join("user"))
+    }
+}
 
 impl Systemd {
     fn timer(job_name: &str) -> String {
@@ -130,11 +139,11 @@ mod tests {
     fn report_units(dir: &Path) -> Vec<Unit> {
         vec![
             Unit {
-                path: dir.join("otto-report.service"),
+                path: dir.join("io.github.tarcisiopgs.otto.report.service"),
                 contents: "[Service]\n".to_owned(),
             },
             Unit {
-                path: dir.join("otto-report.timer"),
+                path: dir.join("io.github.tarcisiopgs.otto.report.timer"),
                 contents: "[Timer]\n".to_owned(),
             },
         ]
@@ -144,12 +153,13 @@ mod tests {
     fn installed_lists_each_otto_job_once() {
         let dir = tempfile::tempdir().unwrap();
         for name in [
-            "otto-report.service",
-            "otto-report.timer",
-            "otto-a-b.timer",
+            "io.github.tarcisiopgs.otto.report.service",
+            "io.github.tarcisiopgs.otto.report.timer",
+            "io.github.tarcisiopgs.otto.a-b.timer",
             "other.service",
-            "otto-.timer",
-            "otto-Bad.service",
+            "otto-backup.timer",
+            "io.github.tarcisiopgs.otto..timer",
+            "io.github.tarcisiopgs.otto.Bad.service",
         ] {
             fs::write(dir.path().join(name), "").unwrap();
         }
@@ -157,6 +167,19 @@ mod tests {
             units_dir: dir.path().to_path_buf(),
         };
         assert_eq!(systemd.installed().unwrap(), ["a-b", "report"]);
+    }
+
+    #[test]
+    fn units_live_where_systemd_looks_for_user_units() {
+        assert_eq!(
+            Systemd::dir_from(Some(Path::new("/xdg")), Some(Path::new("/home/me"))).unwrap(),
+            Path::new("/xdg/systemd/user")
+        );
+        assert_eq!(
+            Systemd::dir_from(None, Some(Path::new("/home/me"))).unwrap(),
+            Path::new("/home/me/.config/systemd/user")
+        );
+        assert!(Systemd::dir_from(None, None).is_err());
     }
 
     #[test]
@@ -185,7 +208,7 @@ mod tests {
             runner.calls(),
             [
                 "systemctl --user daemon-reload",
-                "systemctl --user enable --now otto-report.timer"
+                "systemctl --user enable --now io.github.tarcisiopgs.otto.report.timer"
             ]
         );
     }
@@ -221,7 +244,7 @@ mod tests {
         assert_eq!(
             runner.calls(),
             [
-                "systemctl --user disable --now otto-report.timer",
+                "systemctl --user disable --now io.github.tarcisiopgs.otto.report.timer",
                 "systemctl --user daemon-reload"
             ]
         );
@@ -234,7 +257,7 @@ mod tests {
         let systemd = Systemd {
             units_dir: dir.path().to_path_buf(),
         };
-        let service_path = dir.path().join("otto-report.service");
+        let service_path = dir.path().join("io.github.tarcisiopgs.otto.report.service");
         fs::write(&service_path, "[Service]\n").unwrap();
         let runner = Recorder::new();
 
@@ -291,7 +314,11 @@ mod tests {
         assert!(
             service.contains("StandardError=append:/home/me/.local/state/otto/logs/report.log\n")
         );
-        assert!(units[1].path.ends_with("otto-report.timer"));
+        assert!(
+            units[1]
+                .path
+                .ends_with("io.github.tarcisiopgs.otto.report.timer")
+        );
         assert!(
             units[1]
                 .contents

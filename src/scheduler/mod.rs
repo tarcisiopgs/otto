@@ -14,6 +14,10 @@ use anyhow::{Context as _, Result, bail};
 use crate::config::Job;
 use runner::Runner;
 
+/// Every unit whose file name starts with this belongs to otto, on every
+/// scheduler. Nothing else in a units directory is ever read or removed.
+const PREFIX: &str = "io.github.tarcisiopgs.otto.";
+
 /// A file a scheduler backend wants on disk.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Unit {
@@ -51,7 +55,8 @@ pub trait Scheduler {
     /// Units of other programs are never listed.
     fn installed(&self) -> Result<Vec<String>>;
 
-    /// Writes the units and loads the job into the scheduler.
+    /// Writes the units and loads the job into the scheduler. When it fails the
+    /// units may be left on disk; `unload` cleans up.
     fn load(&self, job_name: &str, units: &[Unit], runner: &dyn Runner) -> Result<()>;
 
     /// Unloads the job from the scheduler and removes its units.

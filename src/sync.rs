@@ -113,16 +113,28 @@ fn sync_job(
     match action {
         Action::Add => {
             prepare_logs(ctx)?;
-            scheduler.load(name, &units, runner)?;
+            load(name, &units, scheduler, runner)?;
         }
         Action::Update => {
             prepare_logs(ctx)?;
             scheduler.unload(name, runner)?;
-            scheduler.load(name, &units, runner)?;
+            load(name, &units, scheduler, runner)?;
         }
         Action::Remove | Action::Unchanged => {}
     }
     Ok(action)
+}
+
+/// Loads a job, and takes its units back off the disk when the scheduler
+/// refuses it. Left there, they would match the jobs file and the next sync
+/// would call the job unchanged while nothing is scheduled.
+fn load(name: &str, units: &[Unit], scheduler: &dyn Scheduler, runner: &dyn Runner) -> Result<()> {
+    let loaded = scheduler.load(name, units, runner);
+    if loaded.is_err() {
+        // Best effort: the load error is the one worth reporting.
+        let _ = scheduler.unload(name, runner);
+    }
+    loaded
 }
 
 /// The scheduler appends to the log file but does not create its directory.
@@ -217,18 +229,19 @@ mod tests {
         }
 
         fn load(&self, job_name: &str, units: &[Unit], _runner: &dyn Runner) -> Result<()> {
-            if self.broken.as_deref() == Some(job_name) {
-                bail!("the scheduler refused {job_name}");
-            }
+            // Like the real backends: the file is written, then the scheduler is asked.
             for unit in units {
                 fs::write(&unit.path, &unit.contents)?;
+            }
+            if self.broken.as_deref() == Some(job_name) {
+                bail!("the scheduler refused {job_name}");
             }
             self.calls.borrow_mut().push(format!("load {job_name}"));
             Ok(())
         }
 
         fn unload(&self, job_name: &str, _runner: &dyn Runner) -> Result<()> {
-            fs::remove_file(self.dir.join(format!("{job_name}.unit")))?;
+            let _ = fs::remove_file(self.dir.join(format!("{job_name}.unit")));
             self.calls.borrow_mut().push(format!("unload {job_name}"));
             Ok(())
         }
@@ -443,5 +456,34 @@ mod tests {
 
         assert!(outcome[0].1.contains("the scheduler refused a"));
         assert_eq!(outcome[1], pair("b", "added"));
+    }
+
+    #[test]
+    fn a_failed_load_is_retried_by_the_next_sync() {
+        let mut world = World::new();
+        world.fake.broken = Some("report".to_owned());
+        let text = job("report", "claude", "prompt.md", "09:00");
+
+        let first = world.sync(&text, false);
+        assert!(first[0].1.contains("the scheduler refused report"));
+        assert!(!world.unit("report").exists());
+
+        world.fake.broken = None;
+        assert_eq!(world.sync(&text, false), [pair("report", "added")]);
+    }
+
+    #[test]
+    fn a_failed_reload_is_retried_by_the_next_sync() {
+        let mut world = World::new();
+        world.sync(&job("report", "claude", "prompt.md", "09:00"), false);
+        world.fake.broken = Some("report".to_owned());
+        let later = job("report", "claude", "prompt.md", "10:00");
+
+        let failed = world.sync(&later, false);
+        assert!(failed[0].1.contains("the scheduler refused report"));
+        assert!(!world.unit("report").exists());
+
+        world.fake.broken = None;
+        assert_eq!(world.sync(&later, false), [pair("report", "added")]);
     }
 }
