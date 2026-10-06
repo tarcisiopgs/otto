@@ -70,3 +70,22 @@ Expect (Otto sync) 'demo\s+removed'
 schtasks /Query /TN 'otto\demo' 2>$null | Out-Null
 if ($LASTEXITCODE -eq 0) { throw 'the task is still registered' }
 Write-Host 'The Windows backend registered, ran, updated and removed a job.'
+
+# An agent CLI installed through npm is a `.cmd`, which Windows runs through
+# cmd.exe. Shown, not required: how such an agent takes a prompt of two lines.
+Set-Content "$work\bin\codex.cmd" "@echo off`r`necho fake codex got: %*"
+Set-Content $config @"
+[jobs.batch]
+agent = "codex"
+prompt = "prompt.md"
+workdir = "job"
+schedule = { at = "03:00" }
+"@
+& $otto --config $config run batch
+Write-Host "an agent that is a .cmd, with a prompt of two lines: exit $LASTEXITCODE"
+& $otto --config $config runs batch
+& $otto --config $config log batch
+
+# The step ends with the last native exit code, and the last ones here are
+# allowed to fail.
+exit 0
