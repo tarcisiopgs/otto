@@ -49,6 +49,12 @@ Publishing the GitHub Release runs `.github/workflows/release.yml`, which builds
 
 One npm package carries every platform's binary, in `bin/<os>-<arch>/otto`. Do not split it into a package per platform: trusted publishing cannot create a package name, and each new name needs a manual bootstrap.
 
+The same workflow attaches a `.deb` per Linux architecture, built by `scripts/build-deb.sh` around the static binary. The `Packaging` workflow installs it with apt when the packaging changes.
+
+Homebrew lives in another repository, `tarcisiopgs/homebrew-tap` (`brew install tarcisiopgs/tap/otto`). It follows the releases on a schedule with its own token, so this repository stores no secret for it. The formula needs the four `.tar.xz` archives and their `.sha256` files under the names the release gives them: renaming an archive breaks the tap.
+
+There is no Windows package (Scoop, winget) because there is no Windows scheduler backend.
+
 Do not create a release or publish to npm unless the user asks for it in that conversation.
 
 ## Rules

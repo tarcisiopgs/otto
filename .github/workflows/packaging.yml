@@ -1,0 +1,36 @@
+name: Packaging
+
+# Installs otto the way a user of a package manager would: the .deb with apt.
+# The package wraps the binary of a published release, so this runs when the
+# packaging changes, not on every pull request.
+on:
+  pull_request:
+    paths:
+      - scripts/build-deb.sh
+      - .github/workflows/packaging.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: .deb with apt
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, install, run and remove the package
+        run: |
+          set -euo pipefail
+          tag=$(gh release view --json tagName --jq .tagName)
+          version="${tag#v}"
+          target=x86_64-unknown-linux-musl
+          gh release download "$tag" --pattern "otto-$target.tar.xz"
+          tar -xJf "otto-$target.tar.xz"
+          scripts/build-deb.sh "otto-$target/otto" "$version" amd64 out
+          sudo apt-get install -y "./out/otto_${version}_amd64.deb"
+          test "$(otto --version)" = "otto $version"
+          sudo apt-get remove -y otto
+          test ! -e /usr/bin/otto
