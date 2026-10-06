@@ -11,12 +11,12 @@ mod which;
 
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal as _, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory as _, Parser, Subcommand};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
@@ -25,6 +25,7 @@ use next::Next;
 use run::Request;
 use scheduler::runner::System;
 use store::{Run, State, Store, Trigger};
+use tui::world::{Real, Setup};
 
 #[derive(Parser)]
 #[command(
@@ -37,8 +38,9 @@ struct Cli {
     #[arg(long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
 
+    /// With none, and on a terminal, otto opens its terminal UI.
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -121,9 +123,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Some(path) => path,
         None => config::default_path()?,
     };
+    // The UI reads the jobs file itself, and opens without one.
+    let Some(command) = cli.command else {
+        return screen(&path);
+    };
     let config = Config::load(&path)?;
 
-    match cli.command {
+    match command {
         Cmd::List => {
             let store = store()?;
             let now = Timestamp::now();
@@ -296,6 +302,35 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 }
 
+/// `otto` with no subcommand opens the UI only when both ends are a terminal.
+fn opens_screen(has_command: bool, stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
+    !has_command && stdin_is_terminal && stdout_is_terminal
+}
+
+/// The terminal UI, or the help where there is no terminal to draw on.
+fn screen(config_path: &Path) -> Result<ExitCode> {
+    if !opens_screen(false, io::stdin().is_terminal(), io::stdout().is_terminal()) {
+        eprint!("{}", Cli::command().render_help());
+        return Ok(ExitCode::from(2));
+    }
+    let editor = ["VISUAL", "EDITOR"]
+        .iter()
+        .filter_map(|name| env::var(name).ok())
+        .find(|value| !value.trim().is_empty());
+    let zone = TimeZone::system();
+    let mut world = Real::new(Setup {
+        config: std::path::absolute(config_path)
+            .with_context(|| format!("cannot resolve {}", config_path.display()))?,
+        store: store()?,
+        runner: Box::new(System),
+        otto: env::current_exe().context("cannot locate the otto binary")?,
+        editor,
+        zone: zone.clone(),
+    });
+    tui::run(&mut world, &Timestamp::now, &zone)?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn set_state(store: &Store, job: &str, state: State) -> Result<ExitCode> {
     store.set_state(job, state)?;
     println!("{job}\t{}", state.label());
@@ -367,6 +402,14 @@ mod tests {
             Some("2026-10-05T19:16:26Z"),
         );
         assert!(run_line(&run, &TimeZone::UTC).ends_with("scheduled\tskipped\t-"));
+    }
+
+    #[test]
+    fn the_screen_opens_only_on_a_terminal_and_without_a_subcommand() {
+        assert!(opens_screen(false, true, true));
+        assert!(!opens_screen(true, true, true));
+        assert!(!opens_screen(false, false, true));
+        assert!(!opens_screen(false, true, false));
     }
 
     #[test]

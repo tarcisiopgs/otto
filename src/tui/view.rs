@@ -52,7 +52,7 @@ pub fn draw(frame: &mut Frame, app: &App, now: &Zoned) {
     });
     lines.extend(body);
     lines.push(notice(app));
-    lines.push(bar(app));
+    lines.push(bar(app, width));
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -97,6 +97,17 @@ fn fit(text: &str, columns: usize) -> String {
     }
     let kept: String = text.chars().take(columns.saturating_sub(1)).collect();
     format!("{kept}…")
+}
+
+/// The end of `text` when it is longer than `columns`: a path says the most
+/// in its last parts.
+fn tail(text: &str, columns: usize) -> String {
+    let length = text.chars().count();
+    if length <= columns {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().skip(length + 1 - columns.max(1)).collect();
+    format!("…{kept}")
 }
 
 /// `text` over as many lines of `columns` as it needs.
@@ -260,7 +271,9 @@ fn problem(app: &App, width: usize) -> Vec<Line<'_>> {
     let Some(error) = &app.snapshot.error else {
         return Vec::new();
     };
-    let mut lines: Vec<Line> = wrapped(error, width.saturating_sub(2))
+    // A parser reports over several lines, with a drawing of the place.
+    let sentence = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut lines: Vec<Line> = wrapped(&sentence, width.saturating_sub(2))
         .into_iter()
         .take(3)
         .map(|part| Line::styled(format!(" {part}"), bad()))
@@ -340,13 +353,15 @@ fn job<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a>
     ));
     lines.push(Line::from(fact("at", schedule(&job.job.schedule))));
     lines.push(Line::from(fact("next", coming(job.next.as_ref(), now, ""))));
+    // A fact starts in column ten and stops a column short of the edge.
+    let room = width.saturating_sub(11);
     lines.push(Line::from(fact(
         "workdir",
-        job.job.workdir.display().to_string(),
+        tail(&job.job.workdir.display().to_string(), room),
     )));
     lines.push(Line::from(fact(
         "prompt",
-        job.job.prompt.display().to_string(),
+        tail(&job.job.prompt.display().to_string(), room),
     )));
     lines.push(Line::from(fact("args", args)));
     lines.push(rule(width));
@@ -436,7 +451,7 @@ fn notice(app: &App) -> Line<'_> {
 }
 
 /// The keys of the screen, or the question the app is waiting on.
-fn bar(app: &App) -> Line<'_> {
+fn bar(app: &App, width: usize) -> Line<'_> {
     if let Some(confirm) = &app.confirm {
         let question = match confirm {
             Confirm::Stop { job, .. } => format!(" stop {job}?"),
@@ -482,7 +497,14 @@ fn bar(app: &App) -> Line<'_> {
         Screen::Help => &[("esc", "back"), ("q", "quit")],
     };
     let mut spans = vec![Span::raw(" ")];
+    let mut used = 1;
     for (key, what) in keys {
+        // One that does not fit is left out whole; the help screen has it.
+        let needed = key.chars().count() + 1 + what.chars().count();
+        if used + needed > width {
+            break;
+        }
+        used += needed + 2;
         spans.push(Span::styled(*key, strong()));
         spans.push(Span::styled(format!(" {what}  "), dim()));
     }
@@ -856,6 +878,40 @@ mod tests {
             error: false,
         });
         assert!(screen(&app, 80, 24).contains("report is already running"));
+    }
+
+    #[test]
+    fn a_shortcut_that_does_not_fit_is_left_out_whole() {
+        let text = screen(&app(vec![job("report")]), 76, 24);
+        let bar = text.lines().last().unwrap().trim_end();
+        assert!(bar.ends_with("? help"), "{bar:?}");
+    }
+
+    #[test]
+    fn a_long_path_keeps_its_end() {
+        let long = JobView {
+            job: Job {
+                prompt: PathBuf::from(format!("/{}/prompts/report.md", "deep/".repeat(30))),
+                ..job("report").job
+            },
+            ..job("report")
+        };
+        let mut app = app(vec![long]);
+        app.act(Action::Open);
+        let text = screen(&app, 80, 24);
+        assert!(text.contains("…"), "{text}");
+        assert!(text.contains("/prompts/report.md"), "{text}");
+    }
+
+    #[test]
+    fn an_error_of_many_lines_reads_as_one_sentence() {
+        let mut app = app(vec![job("report")]);
+        app.snapshot.error = Some("invalid config jobs.toml: TOML parse error\n  |\n1 | jobs = 3\n  |        ^\ninvalid type".to_owned());
+        let text = screen(&app, 80, 24);
+        assert!(
+            text.contains("TOML parse error | 1 | jobs = 3 | ^ invalid type"),
+            "{text}"
+        );
     }
 
     #[test]
