@@ -1,0 +1,3 @@
+# The tests read these files into the binary and compare text against them:
+# they must be the same bytes on every system, Windows included.
+examples/** text eol=lf
