@@ -1,6 +1,7 @@
 //! The terminal UI: `otto` with no subcommand.
 
 pub mod app;
+pub mod form;
 pub mod keys;
 pub mod text;
 pub mod view;
