@@ -247,18 +247,15 @@ impl World for Real {
     }
 
     fn edit(&self, path: &Path) -> Result<()> {
-        // The value may carry arguments, as in `code -w`.
-        let mut parts = self
-            .setup
-            .editor
-            .as_deref()
-            .unwrap_or_default()
-            .split_whitespace();
-        let program = parts
-            .next()
+        // The value may carry arguments, as in `code -w`, and quotes around
+        // a path with a space in it.
+        let parts = words(self.setup.editor.as_deref().unwrap_or_default());
+        let (program, arguments) = parts
+            .split_first()
             .context("set $VISUAL or $EDITOR to edit the prompt")?;
-        let status = Command::new(program)
-            .args(parts)
+        // Looked up as an agent is: on Windows an editor is often a `.cmd`.
+        let status = crate::run::command_for(program)
+            .args(arguments)
             .arg(path)
             .status()
             .with_context(|| format!("cannot start {program}"))?;
@@ -269,41 +266,81 @@ impl World for Real {
     }
 }
 
-/// What fits a terminal cell: no escape sequence, no carriage return, a tab as
-/// four spaces and no other control character. Line feeds stay. Bytes that are
-/// not UTF-8 become the replacement character.
+/// The words of a command line as a shell reads them: split at spaces, with
+/// single and double quotes and a backslash keeping a space inside a word. A
+/// quote that is never closed takes the rest.
+fn words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quote = None;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (c, quote) {
+            (c, Some(open)) if c == open => quote = None,
+            ('\'' | '"', None) => {
+                quote = Some(c);
+                word.get_or_insert_default();
+            }
+            ('\\', None) => word.get_or_insert_default().extend(chars.next()),
+            (c, None) if c.is_whitespace() => words.extend(word.take()),
+            (c, _) => word.get_or_insert_default().push(c),
+        }
+    }
+    words.extend(word);
+    words
+}
+
+const ESCAPE: char = '\u{1b}';
+const BELL: char = '\u{7}';
+/// The one-character form of `ESC \`, which closes a string sequence.
+const TERMINATOR: char = '\u{9c}';
+
+type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
+/// Skips the rest of a control sequence: parameters, then one final byte.
+fn skip_control(chars: &mut Chars) {
+    for c in chars.by_ref() {
+        if ('@'..='~').contains(&c) {
+            break;
+        }
+    }
+}
+
+/// Skips the rest of a string sequence (a title, a device control string): it
+/// ends at a bell or at a terminator. One that is never closed ends with its
+/// line.
+fn skip_string(chars: &mut Chars) {
+    while let Some(c) = chars.next_if(|next| *next != '\n') {
+        match c {
+            BELL | TERMINATOR => break,
+            ESCAPE => {
+                chars.next_if_eq(&'\\');
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What fits a terminal cell: no escape sequence, a tab as four spaces and no
+/// other control character. Line feeds stay. A carriage return alone rewrites
+/// its line, as a progress indicator means it to. Bytes that are not UTF-8
+/// become the replacement character.
 pub fn printable(bytes: &[u8]) -> String {
-    const ESCAPE: char = '\u{1b}';
-    const BELL: char = '\u{7}';
     let text = String::from_utf8_lossy(bytes);
     let mut out = String::with_capacity(text.len());
+    // Where the line being written starts in `out`.
+    let mut line = 0;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             // An escape followed by a control character is cut short: the
             // line feed after it is still a line feed.
             ESCAPE => match chars.next_if(|next| !next.is_control()) {
-                // Control sequence: parameters, then one final byte.
-                Some('[') => {
-                    for c in chars.by_ref() {
-                        if ('@'..='~').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-                // Operating system command: ends at a bell or at `ESC \`. One
-                // that is never closed ends with its line.
-                Some(']') => {
-                    while let Some(c) = chars.next_if(|next| *next != '\n') {
-                        if c == BELL {
-                            break;
-                        }
-                        if c == ESCAPE {
-                            chars.next_if_eq(&'\\');
-                            break;
-                        }
-                    }
-                }
+                Some('[') => skip_control(&mut chars),
+                // An operating system command, a device control string and
+                // the three other strings a terminal takes.
+                Some(']' | 'P' | 'X' | '^' | '_') => skip_string(&mut chars),
                 // Intermediate bytes, then one final byte: `ESC ( B`.
                 Some(' '..='/') => {
                     while chars.next_if(|next| (' '..='/').contains(next)).is_some() {}
@@ -312,7 +349,20 @@ pub fn printable(bytes: &[u8]) -> String {
                 // Any other escape is two characters long.
                 _ => {}
             },
-            '\n' => out.push('\n'),
+            // The same introducers as one character each.
+            '\u{9b}' => skip_control(&mut chars),
+            '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => skip_string(&mut chars),
+            '\n' => {
+                out.push('\n');
+                line = out.len();
+            }
+            // Before a line feed it is only the end of the line; before more
+            // text it takes the cursor back, and that text replaces the line.
+            '\r' => {
+                if chars.peek().is_some_and(|next| *next != '\n') {
+                    out.truncate(line);
+                }
+            }
             '\t' => out.push_str("    "),
             c if c.is_control() => {}
             c => out.push(c),
@@ -431,6 +481,38 @@ schedule = { at = \"07:00\" }
         assert_eq!(printable(b"\x1b]0;title\x07after"), "after");
         assert_eq!(printable(b"\x1b]8;;http://x\x1b\\link"), "link");
         assert_eq!(printable(b"a\xffb"), "a\u{fffd}b");
+    }
+
+    #[test]
+    fn a_progress_line_shows_where_it_ended() {
+        // A carriage return alone takes the cursor back to rewrite the line.
+        assert_eq!(printable(b"10%\r20%\r100%\r\nnext"), "100%\nnext");
+        assert_eq!(printable(b"kept\nold\rnew"), "kept\nnew");
+    }
+
+    #[test]
+    fn device_strings_and_eight_bit_controls_are_left_out() {
+        // A device control string, closed by `ESC \`.
+        assert_eq!(printable(b"a\x1bP1$r0m\x1b\\b"), "ab");
+        // The same introducers as one character each.
+        assert_eq!(printable("a\u{9b}31mred".as_bytes()), "ared");
+        assert_eq!(printable("a\u{9d}0;title\u{9c}b".as_bytes()), "ab");
+        assert_eq!(printable("a\u{90}data\u{9c}b".as_bytes()), "ab");
+    }
+
+    #[test]
+    fn the_editor_value_is_read_like_a_shell_would() {
+        assert_eq!(words("code -w"), ["code", "-w"]);
+        assert_eq!(
+            words("\"/Applications/My Editor/bin/edit\" --wait"),
+            ["/Applications/My Editor/bin/edit", "--wait"]
+        );
+        assert_eq!(words("'/opt/my editor/e' -n"), ["/opt/my editor/e", "-n"]);
+        assert_eq!(words("/opt/my\\ editor/e"), ["/opt/my editor/e"]);
+        assert_eq!(words("  vim  "), ["vim"]);
+        assert!(words("   ").is_empty());
+        // A quote that is never closed takes the rest.
+        assert_eq!(words("vim 'a b"), ["vim", "a b"]);
     }
 
     #[test]
@@ -718,6 +800,21 @@ mod unix_tests {
         let editor = format!("{} --wait", script(&dir, "\"$@\"").display());
         let real = Real::new(Setup {
             editor: Some(editor),
+            ..setup(&dir, Box::new(Recorder::new()))
+        });
+        real.edit(Path::new("/prompts/report.md")).unwrap();
+        assert_eq!(output(&dir), "--wait /prompts/report.md");
+    }
+
+    #[test]
+    fn an_editor_in_a_directory_with_a_space_is_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let spaced = dir.path().join("my editor");
+        fs::create_dir(&spaced).unwrap();
+        let editor = spaced.join("edit");
+        fs::copy(script(&dir, "\"$@\""), &editor).unwrap();
+        let real = Real::new(Setup {
+            editor: Some(format!("\"{}\" --wait", editor.display())),
             ..setup(&dir, Box::new(Recorder::new()))
         });
         real.edit(Path::new("/prompts/report.md")).unwrap();

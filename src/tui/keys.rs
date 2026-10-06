@@ -10,6 +10,12 @@ pub fn action(key: KeyEvent, app: &App) -> Option<Action> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
+    // A key held with one of these is a shortcut of the terminal or of the
+    // window manager, not the plain key.
+    let other = KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META;
+    if key.modifiers.intersects(other) {
+        return None;
+    }
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     if app.confirm.is_some() {
         // Only `y` says yes: Enter is too easy to press for a question that
@@ -117,6 +123,17 @@ mod tests {
             assert_eq!(action(press(code), &app), Some(expected), "{code:?}");
         }
         assert_eq!(action(press(KeyCode::Char('z')), &app), None);
+    }
+
+    #[test]
+    fn a_key_held_with_alt_is_another_key() {
+        let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT);
+        assert_eq!(action(key, &running()), None);
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SUPER);
+        assert_eq!(action(key, &running()), None);
+        // Shift is how `G` is typed.
+        let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        assert_eq!(action(key, &running()), Some(Action::Bottom));
     }
 
     #[test]

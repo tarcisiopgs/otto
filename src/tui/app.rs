@@ -4,7 +4,11 @@
 use std::path::PathBuf;
 
 use crate::store::{Outcome, Run, State};
+use crate::tui::text::rows;
 use crate::tui::world::{JobView, Log, Snapshot};
+
+/// The rows a job takes on the list: two lines and the rule that closes it.
+pub const ENTRY: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -265,23 +269,10 @@ impl App {
     /// The log as the rows the screen shows: a line longer than the screen
     /// is wide goes on in the next row.
     pub fn log_rows(&self) -> Vec<&str> {
-        let Some(log) = &self.log else {
-            return Vec::new();
-        };
-        let columns = self.columns.max(1);
-        let mut rows = Vec::new();
-        for line in log.text.lines() {
-            let (mut start, mut taken) = (0, 0);
-            for (index, _) in line.char_indices() {
-                if taken == columns {
-                    rows.push(&line[start..index]);
-                    (start, taken) = (index, 0);
-                }
-                taken += 1;
-            }
-            rows.push(&line[start..]);
-        }
-        rows
+        let text = self.log.as_ref().map_or("", |log| log.text.as_str());
+        text.lines()
+            .flat_map(|line| rows(line, self.columns))
+            .collect()
     }
 
     /// The highest first line that still fills the page.
@@ -289,8 +280,14 @@ impl App {
         self.log_rows().len().saturating_sub(self.page)
     }
 
+    /// How far a page moves: the rows of the page, or on the list the jobs
+    /// that fit in it.
     fn page_step(&self) -> isize {
-        isize::try_from(self.page.max(1)).unwrap_or(isize::MAX)
+        let step = match self.screen {
+            Screen::Jobs => self.page / ENTRY,
+            _ => self.page,
+        };
+        isize::try_from(step.max(1)).unwrap_or(isize::MAX)
     }
 
     fn job_index(&self) -> Option<usize> {
@@ -657,6 +654,22 @@ mod tests {
         app.act(Action::Open);
         assert_eq!(app.screen, Screen::Job);
         assert_eq!(text(&app), "no runs yet");
+    }
+
+    #[test]
+    fn a_page_on_the_list_is_as_many_jobs_as_fit() {
+        let jobs = (0..20).map(|n| job(&format!("job-{n:02}"))).collect();
+        let mut app = App::new(snapshot(jobs));
+        // Nine rows hold three entries of three rows each.
+        app.page = 9;
+        app.act(Action::PageDown);
+        assert_eq!(app.job.as_deref(), Some("job-03"));
+        app.act(Action::PageUp);
+        assert_eq!(app.job.as_deref(), Some("job-00"));
+        // Too short for a whole entry: a page is still one job.
+        app.page = 2;
+        app.act(Action::PageDown);
+        assert_eq!(app.job.as_deref(), Some("job-01"));
     }
 
     #[test]

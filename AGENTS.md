@@ -41,6 +41,7 @@ src/tui/mod.rs            the terminal UI: takes the terminal, runs the event lo
 src/tui/app.rs            App: the state of the UI; actions in, effects out
 src/tui/view.rs           draws the state; the look is in DESIGN.md
 src/tui/keys.rs           which key asks for which action
+src/tui/text.rs           fits text to the columns of a terminal: width, cut, wrap
 src/tui/world.rs          World: everything the UI reads from disk or asks of a process
 src/scheduler/mod.rs      Scheduler trait, Unit, Context, native() picks the backend for this OS
 src/scheduler/runner.rs   Runner: how a backend runs launchctl/systemctl; Recorder fakes it in tests
@@ -82,6 +83,7 @@ Do not create a release or publish to npm unless the user asks for it in that co
 - The UI keeps its selection by job name and run id, never by index: the list changes under it every second.
 - A run is stopped as a process group, through `Runner`. Its record names the `otto run` process, and ending that alone leaves the agent running. Before the signal, the process is checked to be `otto … run <job>`: a stale record can name a process id that now belongs to something else.
 - A process otto starts and does not wait for is collected later (`Children::reap`). One that ended and was not collected still answers as alive.
+- On screen, text is measured in columns with `src/tui/text.rs`, never with `chars().count()`: a CJK character takes two columns.
 - `ratatui` brings `crossterm` (`ratatui::crossterm`). Do not add `crossterm` as a dependency of its own: two versions give two incompatible sets of event types.
 - The suite also runs on Windows. A test module that needs a Unix (execute bits, `sh`, paths written with `/`) carries `#[cfg(test)]` and `#[cfg(unix)]` as two attributes: clippy only treats a module as test code when it sees `#[cfg(test)]` on its own.
 - Job names are lowercase letters, digits and dashes: they end up in service labels and file names.

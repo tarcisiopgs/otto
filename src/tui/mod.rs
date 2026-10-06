@@ -2,9 +2,11 @@
 
 pub mod app;
 pub mod keys;
+pub mod text;
 pub mod view;
 pub mod world;
 
+use std::io;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -12,6 +14,10 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 
 use app::{App, Effect};
 use world::World;
@@ -22,7 +28,14 @@ const TICK: Duration = Duration::from_secs(1);
 /// Runs the UI until the user quits. The terminal is given back on every way
 /// out, a panic included.
 pub fn run(world: &mut dyn World, now: &dyn Fn() -> Timestamp, zone: &TimeZone) -> Result<()> {
-    let mut terminal = ratatui::try_init().context("cannot take over the terminal")?;
+    let mut terminal = match ratatui::try_init() {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            // It may have got as far as raw mode before failing.
+            ratatui::restore();
+            return Err(error).context("cannot take over the terminal");
+        }
+    };
     let result = watch(&mut terminal, world, now, zone);
     ratatui::restore();
     result
@@ -65,13 +78,9 @@ fn watch(
             match effect {
                 Effect::Quit => return Ok(()),
                 Effect::Edit { path } => {
-                    // The editor needs the terminal as the shell left it,
-                    // cursor included: drawing hides it.
-                    terminal.show_cursor().context(cannot_draw)?;
-                    ratatui::restore();
+                    suspend(terminal).context(cannot_draw)?;
                     let edited = world.edit(&path);
-                    *terminal = ratatui::try_init().context("cannot take over the terminal")?;
-                    terminal.clear().context(cannot_draw)?;
+                    resume(terminal).context("cannot take over the terminal")?;
                     app.done(edited.map_err(|error| format!("{error:#}")));
                 }
                 other => app.done(perform(&other, world)),
@@ -85,6 +94,22 @@ fn watch(
             load_log(&mut app, world);
         }
     }
+}
+
+/// Hands the terminal to another program as the shell left it: cursor shown
+/// (drawing hides it), cooked mode, the screen the user had before otto.
+fn suspend(terminal: &mut DefaultTerminal) -> io::Result<()> {
+    terminal.show_cursor()?;
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen)
+}
+
+/// Takes the terminal back after `suspend`. Unlike a second `ratatui::init`,
+/// this does not install the panic hook again on top of itself.
+fn resume(terminal: &mut DefaultTerminal) -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    terminal.clear()
 }
 
 /// Carries out an effect that does not need the terminal. A failure comes back
