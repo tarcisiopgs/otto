@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 
-use super::{Scheduler, Unit};
+use super::{Context, Scheduler, Unit};
 use crate::config::{Job, home_dir};
 
 /// macOS: one LaunchAgent per job, in the user's GUI session so the agent CLI
@@ -29,9 +29,10 @@ impl Scheduler for Launchd {
         "launchd"
     }
 
-    fn units(&self, job_name: &str, job: &Job, otto: &Path) -> Result<Vec<Unit>> {
+    fn units(&self, job_name: &str, job: &Job, ctx: &Context) -> Result<Vec<Unit>> {
         let (hour, minute) = job.schedule.time()?;
         let label = label(job_name);
+        let log = ctx.log_file(job_name);
         // launchd fires a missed StartCalendarInterval once when the Mac wakes up.
         let intervals: String = job
             .schedule
@@ -54,20 +55,34 @@ impl Scheduler for Launchd {
 	<key>ProgramArguments</key>
 	<array>
 		<string>{otto}</string>
+		<string>--config</string>
+		<string>{config}</string>
 		<string>run</string>
 		<string>{job_name}</string>
 	</array>
 	<key>StartCalendarInterval</key>
 	<array>
 {intervals}	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>{path}</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>{log}</string>
+	<key>StandardErrorPath</key>
+	<string>{log}</string>
 	<key>ProcessType</key>
 	<string>Background</string>
 </dict>
 </plist>
 "#,
             label = escape(&label),
-            otto = escape(&otto.to_string_lossy()),
+            otto = escape(&ctx.otto.to_string_lossy()),
+            config = escape(&ctx.config.to_string_lossy()),
             job_name = escape(job_name),
+            path = escape(&ctx.path),
+            log = escape(&log.to_string_lossy()),
         );
         Ok(vec![Unit {
             path: self.agents_dir.join(format!("{label}.plist")),
@@ -84,6 +99,8 @@ fn escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::config::Config;
 
@@ -98,12 +115,14 @@ mod tests {
         let launchd = Launchd {
             agents_dir: PathBuf::from("/Users/me/Library/LaunchAgents"),
         };
+        let ctx = Context {
+            otto: PathBuf::from("/opt/R&D/otto"),
+            config: PathBuf::from("/Users/me/.config/otto/jobs.toml"),
+            path: "/Users/me/.local/bin:/opt/a<b/bin".to_owned(),
+            log_dir: PathBuf::from("/Users/me/.local/state/otto/logs"),
+        };
         let units = launchd
-            .units(
-                "report",
-                config.job("report").unwrap(),
-                Path::new("/opt/R&D/otto"),
-            )
+            .units("report", config.job("report").unwrap(), &ctx)
             .unwrap();
 
         assert_eq!(units.len(), 1);
@@ -119,5 +138,32 @@ mod tests {
         assert!(plist.contains("<integer>5</integer>"));
         assert!(plist.contains("<string>/opt/R&amp;D/otto</string>"));
         assert!(plist.contains("<string>report</string>"));
+
+        let args = plist.split("<key>ProgramArguments</key>").nth(1).unwrap();
+        let order = [
+            "/opt/R&amp;D/otto",
+            "--config",
+            "/Users/me/.config/otto/jobs.toml",
+            "run",
+            "report",
+        ];
+        let mut from = 0;
+        for value in order {
+            let at = args[from..]
+                .find(&format!("<string>{value}</string>"))
+                .expect(value);
+            from += at;
+        }
+        assert!(plist.contains(
+            "<key>PATH</key>\n\t\t<string>/Users/me/.local/bin:/opt/a&lt;b/bin</string>"
+        ));
+        assert_eq!(
+            plist
+                .matches("<string>/Users/me/.local/state/otto/logs/report.log</string>")
+                .count(),
+            2
+        );
+        assert!(plist.contains("<key>StandardOutPath</key>"));
+        assert!(plist.contains("<key>StandardErrorPath</key>"));
     }
 }

@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 
-use super::{Scheduler, Unit};
+use super::{Context, Scheduler, Unit};
 use crate::config::{Job, home_dir};
 
 /// Linux: a user service plus a timer per job.
@@ -24,7 +24,7 @@ impl Scheduler for Systemd {
         "systemd"
     }
 
-    fn units(&self, job_name: &str, job: &Job, otto: &Path) -> Result<Vec<Unit>> {
+    fn units(&self, job_name: &str, job: &Job, ctx: &Context) -> Result<Vec<Unit>> {
         let (hour, minute) = job.schedule.time()?;
         let days: Vec<&str> = job
             .schedule
@@ -32,9 +32,12 @@ impl Scheduler for Systemd {
             .iter()
             .map(|day| day.systemd_name())
             .collect();
+        let log = specifiers(&ctx.log_file(job_name).to_string_lossy());
         let service = format!(
-            "[Unit]\nDescription=otto job {job_name}\n\n[Service]\nType=oneshot\nExecStart=\"{}\" run {job_name}\n",
-            otto.display()
+            "[Unit]\nDescription=otto job {job_name}\n\n[Service]\nType=oneshot\nEnvironment=\"PATH={path}\"\nExecStart=\"{otto}\" --config \"{config}\" run {job_name}\nStandardOutput=append:{log}\nStandardError=append:{log}\n",
+            path = quoted(&ctx.path),
+            otto = quoted(&ctx.otto.to_string_lossy()),
+            config = quoted(&ctx.config.to_string_lossy()),
         );
         // Persistent=true runs a missed activation at the next boot or login.
         let timer = format!(
@@ -54,13 +57,24 @@ impl Scheduler for Systemd {
     }
 }
 
+/// systemd expands `%` specifiers in unit files; a literal one is doubled.
+fn specifiers(text: &str) -> String {
+    text.replace('%', "%%")
+}
+
+/// A value placed between double quotes in a unit file.
+fn quoted(text: &str) -> String {
+    specifiers(text).replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::config::Config;
 
-    #[test]
-    fn the_timer_carries_days_and_time() {
+    fn units_with_path(path: &str) -> Vec<Unit> {
         let config = Config::parse(
             "[jobs.report]\nagent = \"codex\"\nprompt = \"/p.md\"\nworkdir = \"/w\"\nschedule = { at = \"07:00\", days = [\"mon\", \"fri\"] }\n",
             Path::new("/"),
@@ -70,19 +84,42 @@ mod tests {
         let systemd = Systemd {
             units_dir: PathBuf::from("/home/me/.config/systemd/user"),
         };
-        let units = systemd
-            .units(
-                "report",
-                config.job("report").unwrap(),
-                Path::new("/usr/bin/otto"),
-            )
-            .unwrap();
+        let ctx = Context {
+            otto: PathBuf::from("/usr/bin/otto"),
+            config: PathBuf::from("/home/me/my config/jobs.toml"),
+            path: path.to_owned(),
+            log_dir: PathBuf::from("/home/me/.local/state/otto/logs"),
+        };
+        systemd
+            .units("report", config.job("report").unwrap(), &ctx)
+            .unwrap()
+    }
 
-        assert_eq!(units.len(), 2);
+    #[test]
+    fn quotes_and_backslashes_survive_in_quoted_values() {
+        let units = units_with_path(r#"/a"b:/c\d"#);
         assert!(
             units[0]
                 .contents
-                .contains("ExecStart=\"/usr/bin/otto\" run report")
+                .contains(r#"Environment="PATH=/a\"b:/c\\d""#)
+        );
+    }
+
+    #[test]
+    fn the_timer_carries_days_and_time() {
+        let units = units_with_path("/home/me/bin:/opt/50%/bin");
+
+        assert_eq!(units.len(), 2);
+        let service = &units[0].contents;
+        assert!(service.contains(
+            "ExecStart=\"/usr/bin/otto\" --config \"/home/me/my config/jobs.toml\" run report\n"
+        ));
+        assert!(service.contains("Environment=\"PATH=/home/me/bin:/opt/50%%/bin\"\n"));
+        assert!(
+            service.contains("StandardOutput=append:/home/me/.local/state/otto/logs/report.log\n")
+        );
+        assert!(
+            service.contains("StandardError=append:/home/me/.local/state/otto/logs/report.log\n")
         );
         assert!(units[1].path.ends_with("otto-report.timer"));
         assert!(

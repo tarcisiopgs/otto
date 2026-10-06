@@ -4,10 +4,10 @@ mod scheduler;
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use config::Config;
@@ -52,6 +52,22 @@ fn main() -> ExitCode {
     }
 }
 
+/// What a scheduler unit is built from: this binary, the jobs file and the
+/// `PATH` of the terminal otto was called from.
+fn context(config_path: &Path) -> Result<scheduler::Context> {
+    let path = env::var("PATH").unwrap_or_default();
+    if path.is_empty() {
+        bail!("PATH is empty; run otto from your terminal");
+    }
+    Ok(scheduler::Context {
+        otto: env::current_exe().context("cannot locate the otto binary")?,
+        config: std::path::absolute(config_path)
+            .with_context(|| format!("cannot resolve {}", config_path.display()))?,
+        path,
+        log_dir: config::log_dir()?,
+    })
+}
+
 fn run(cli: Cli) -> Result<ExitCode> {
     let path = match cli.config {
         Some(path) => path,
@@ -80,9 +96,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Cmd::Plan { job: name } => {
             let job = config.job(&name)?;
-            let otto = env::current_exe().context("cannot locate the otto binary")?;
+            let ctx = context(&path)?;
             let scheduler = scheduler::native()?;
-            for unit in scheduler.units(&name, job, &otto)? {
+            for unit in scheduler.units(&name, job, &ctx)? {
                 println!(
                     "# {}: {}\n{}",
                     scheduler.name(),

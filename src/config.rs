@@ -161,6 +161,22 @@ pub fn default_path() -> Result<PathBuf> {
     Ok(dir.join("otto").join("jobs.toml"))
 }
 
+/// `<xdg_state>/otto/logs`, falling back to `<home>/.local/state/otto/logs`.
+pub fn log_dir_from(xdg_state: Option<&Path>, home: Option<&Path>) -> Result<PathBuf> {
+    let state = match (xdg_state, home) {
+        (Some(dir), _) => dir.to_path_buf(),
+        (None, Some(home)) => home.join(".local").join("state"),
+        (None, None) => bail!("cannot find the home directory to keep logs in"),
+    };
+    Ok(state.join("otto").join("logs"))
+}
+
+/// Where the output of scheduled runs is kept, one file per job.
+pub fn log_dir() -> Result<PathBuf> {
+    let xdg_state = env::var_os("XDG_STATE_HOME").map(PathBuf::from);
+    log_dir_from(xdg_state.as_deref(), home_dir().as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +214,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{error:#}").contains("job broken"));
+    }
+
+    #[test]
+    fn logs_live_under_the_state_directory() {
+        assert_eq!(
+            log_dir_from(Some(Path::new("/state")), Some(Path::new("/home/me"))).unwrap(),
+            Path::new("/state/otto/logs")
+        );
+        assert_eq!(
+            log_dir_from(None, Some(Path::new("/home/me"))).unwrap(),
+            Path::new("/home/me/.local/state/otto/logs")
+        );
+        assert!(log_dir_from(None, None).is_err());
     }
 
     #[test]
