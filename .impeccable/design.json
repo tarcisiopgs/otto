@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-06T21:21:40Z",
+  "title": "Design System: otto",
+  "extensions": {
+    "colorMeta": {
+      "accent": {
+        "role": "primary",
+        "displayName": "Accent (the terminal theme's yellow)",
+        "canonical": "yellow"
+      },
+      "failure": {
+        "role": "secondary",
+        "displayName": "Failure (the terminal theme's red)",
+        "canonical": "red"
+      }
+    }
+  },
+  "components": [],
+  "narrative": {
+    "northStar": "The Logbook",
+    "overview": "Every job is an entry and every run leaves a mark in it. The user reads which routines are healthy from the marks, reads when each runs next in plain words, and reaches a run's output in two keystrokes, without opening a file.\n\nThe logbook refuses bordered panes. Nothing is boxed and nothing is split into list and detail. An entry is closed by one dim ruled line that grows out of a margin rule, and a screen is a single column read top to bottom.",
+    "keyCharacteristics": [
+      "lowercase everywhere, including weekdays, months and the name `otto`",
+      "one margin rule (`│`, `├───`) and no other line drawing",
+      "one accent, on two glyphs only",
+      "every state has a glyph or a word of its own; colour only repeats it",
+      "the terminal's own background, in a light or a dark theme, locally or over SSH"
+    ],
+    "rules": [
+      {
+        "name": "The Own Ground Rule",
+        "body": "Never set a background. No cell in `src/tui` carries one; the terminal's background is the page.",
+        "section": "colors"
+      },
+      {
+        "name": "The Two Glyphs Rule",
+        "body": "Yellow is spent on `▸` and `●`. A new screen that needs emphasis uses BOLD.",
+        "section": "colors"
+      },
+      {
+        "name": "The Colourless Rule",
+        "body": "Remove every colour and the screen must still say the same thing. A state that only a colour distinguishes is not drawn yet.",
+        "section": "colors"
+      }
+    ],
+    "dos": [
+      "Do draw a new screen as header, blank row, body, notice, shortcut bar, and test it at 60 × 12.",
+      "Do put what belongs to an entry behind ` │ ` and close the entry with ` ├───`.",
+      "Do give every new state a word or a glyph before giving it a colour.",
+      "Do reuse the exact words above; a new label is lowercase and as short.",
+      "Do say time in words relative to today (`today 16:05`) before falling back to a date.",
+      "Do name the action or the place on every control (`y stop`, `enter log`), never `ok`, `yes` or `confirm`.",
+      "Do make an error name the problem and the way out (`showing the last valid read; fix the file to reload`).",
+      "Do write screen text in English.",
+      "Do keep the way back and the way to the help in the shortcut bar at every width."
+    ],
+    "donts": [
+      "Don't draw a box, a border or a pane, or split a screen into a list and its detail.",
+      "Don't set a background colour or reverse video, for selection or anything else.",
+      "Don't use yellow on a word, or red on anything that is not a failure or an error.",
+      "Don't let Enter confirm a question.",
+      "Don't open a popup or an overlay; a question takes the shortcut bar.",
+      "Don't capitalise a label, a weekday or a month.",
+      "Don't wrap an entry line; give content up in a stated order instead."
+    ]
+  }
+}

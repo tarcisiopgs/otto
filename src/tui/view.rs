@@ -349,8 +349,10 @@ fn strip(job: &JobView, count: usize) -> Vec<Span<'static>> {
 /// the last run ended.
 ///
 /// With room, the strip ends in a fixed column, so the newest run of every
-/// job is read down one column. Without it the line gives up, in this order,
-/// the alignment, the duration, the word `last` and the oldest marks.
+/// job is read down one column. Without it the strips still stack, after a
+/// coming run given the room of an ordinary one, and the ending gives up its
+/// duration, then the word `last`. Only then does the line let go of the
+/// shared column, and last of all of its oldest marks.
 fn second_line(job: &JobView, now: &Zoned, width: usize) -> Line<'static> {
     let lead = vec![
         Span::styled(" │ ", dim()),
