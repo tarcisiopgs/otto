@@ -638,7 +638,12 @@ mod tests {
     fn a_run_that_ends_while_being_checked_keeps_its_own_outcome() {
         let (_dir, store) = store();
         let run = store
-            .begin("report", Trigger::Scheduled, 4242, at("2026-10-05T19:00:00Z"))
+            .begin(
+                "report",
+                Trigger::Scheduled,
+                4242,
+                at("2026-10-05T19:00:00Z"),
+            )
             .unwrap();
         let racing = FinishesMeanwhile {
             store: &store,
@@ -669,7 +674,12 @@ mod tests {
     fn a_process_that_cannot_be_checked_counts_as_running() {
         let (_dir, store) = store();
         store
-            .begin("report", Trigger::Scheduled, 4242, at("2026-10-05T19:00:00Z"))
+            .begin(
+                "report",
+                Trigger::Scheduled,
+                4242,
+                at("2026-10-05T19:00:00Z"),
+            )
             .unwrap();
 
         let runs = store

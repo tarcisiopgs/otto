@@ -64,6 +64,12 @@ A run ends as `ok`, `failed` (with the agent's exit code), `skipped`, `paused` o
 
 A job runs once at a time. A scheduled run that finds the job running is recorded as `skipped`; a second `otto run` is refused.
 
+A run that could not start (the prompt file is gone, the working directory is gone, the agent CLI is not found) is recorded as `failed`, and `otto log` shows the reason.
+
+otto knows a job is running because its latest record is still open and the otto process that opened it is alive. If a job stays `running` when nothing is running, which can happen when another process got the same process id, delete that run's `<id>.toml` in the job's directory below.
+
+Pause and skip need the unit `otto sync` writes today. After upgrading otto, run `otto sync` once: a unit written by an older version starts the agent regardless.
+
 otto keeps the newest 50 runs of each job, in `~/.local/state/otto/jobs/<job>/` (`$XDG_STATE_HOME/otto/jobs` when that is set): a small file per run and its output beside it. Removing a job from the jobs file keeps its history. What otto itself prints during a scheduled run, such as a prompt file it could not read, goes to `~/.local/state/otto/logs/<job>.log`.
 
 ## Build
