@@ -1,0 +1,21 @@
+{
+  "name": "@tarcisiopgs/otto",
+  "version": "0.0.0",
+  "description": "Scheduled runs for coding agents, on the scheduler your OS already has.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tarcisiopgs/otto.git"
+  },
+  "homepage": "https://github.com/tarcisiopgs/otto",
+  "keywords": ["agents", "scheduler", "launchd", "systemd", "automation", "cli", "claude", "codex"],
+  "bin": {
+    "otto": "bin/otto.js"
+  },
+  "files": ["bin"],
+  "os": ["darwin", "linux"],
+  "cpu": ["arm64", "x64"],
+  "engines": {
+    "node": ">=18"
+  }
+}
