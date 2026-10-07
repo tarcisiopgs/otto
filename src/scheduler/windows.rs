@@ -174,6 +174,7 @@ mod tests {
             config: PathBuf::from(r"C:\Users\me\R&D\jobs.toml"),
             path: "a-path-that-must-not-appear".to_owned(),
             log_dir: PathBuf::from("logs"),
+            version: "1.2.3",
         };
 
         let units = backend(&dir)

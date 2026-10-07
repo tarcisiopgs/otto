@@ -65,6 +65,8 @@ A run that could not start (the prompt file is gone, the working directory is go
 
 otto knows a job is running because its latest record is still open and the otto process that opened it is alive. If a job stays `running` when nothing is running, which can happen when another process got the same process id, delete that run's `<id>.toml` in the job's directory below.
 
+On macOS, run `otto sync` after every upgrade of otto, or answer the sync the terminal UI shows as not applied. At login launchd ties each job to the otto binary it finds, and when an upgrade replaces that binary it kills the run before otto starts: nothing is recorded and the job shows as never run. The unit carries the version of the otto that wrote it, so after an upgrade every job is one to reload, and reloading it is what frees it.
+
 Pause and skip need the unit `otto sync` writes today. After upgrading otto, run `otto sync` once: a unit written by an older version starts the agent regardless.
 
 otto keeps the newest 50 runs of each job, in `~/.local/state/otto/jobs/<job>/` (`$XDG_STATE_HOME/otto/jobs` when that is set): a small file per run and its output beside it. Removing a job from the jobs file keeps its history. What otto itself prints during a scheduled run, such as a prompt file it could not read, goes to `~/.local/state/otto/logs/<job>.log`.

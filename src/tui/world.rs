@@ -1169,6 +1169,7 @@ mod unix_tests {
             config: at("jobs.toml"),
             path: at("bin").to_string_lossy().into_owned(),
             log_dir: at("logs"),
+            version: "1.2.3",
         };
         let real = Real::new(Setup {
             sync: Some((Box::new(scheduler), ctx)),
