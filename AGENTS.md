@@ -8,7 +8,7 @@ otto is a Rust CLI that runs coding agents (Claude Code, Codex) on a schedule. I
 
 It starts agents unattended on the user's machine, with the user's credentials. **Never add permission-bypassing flags to an agent command on otto's behalf.** What an agent may do comes from the job's `args`, written by the user.
 
-The user-facing overview and the roadmap are in `README.md`.
+The user-facing overview and the roadmap are in `README.md`, which is short on purpose: what otto is, how to start, and the few things worth knowing first. The detail of a behaviour goes in `docs/` (`terminal-ui.md`, `how-it-works.md`, `install.md`, `windows.md`), not in the README.
 
 ## Commands
 
