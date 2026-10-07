@@ -6,7 +6,7 @@ otto runs Claude Code or Codex on a schedule, without a session, a desktop app o
 
 The name comes from Otto, the school bus driver: he shows up on schedule. It also sounds like "auto".
 
-> **Status: early.** Jobs are scheduled for real with `otto sync`, and every run is recorded. Notifications are not built yet. See [Roadmap](#roadmap).
+> **Status: early.** Jobs are scheduled for real with `otto sync`, every run is recorded, and a run that fails tells you. See [Roadmap](#roadmap).
 
 ## Install
 
@@ -49,6 +49,7 @@ prompt = "prompts/linear-updates.md"   # relative to this file
 workdir = "~/Workspace/app"            # where the agent runs
 schedule = { at = "16:05", days = ["mon", "tue", "wed", "thu", "fri"] }
 args = ["--permission-mode", "auto"]   # extra arguments for the agent CLI
+notify = "finish"                      # off | failures | finish | all; failures when left out
 ```
 
 A scheduled run has nobody to answer permission prompts, so `args` is where the agent gets its permissions up front. otto adds none on its own.
@@ -112,7 +113,7 @@ The next run is otto's own reading of the schedule, not something it asks the OS
 
 ### Creating and editing a job
 
-`n` opens a form for a new job and `E` opens it on the selected one: name, agent, time, days, working directory, prompt file and arguments (one to a line). `tab` moves between the fields, `space` marks an agent or a day, `ctrl-s` saves and `esc` leaves; every letter is text there, so the single-letter keys of the other screens do not apply. The line above the keys says what the field you are on takes.
+`n` opens a form for a new job and `E` opens it on the selected one: name, agent, time, days, working directory, prompt file, arguments (one to a line) and which runs the job [tells you about](#notifications). `tab` moves between the fields, `space` marks an agent, a day or a level of notification, `ctrl-s` saves and `esc` leaves; every letter is text there, so the single-letter keys of the other screens do not apply. The line above the keys says what the field you are on takes.
 
 Saving writes `jobs.toml`, and only what changed in it: your comments, the order of the jobs and the layout of the file stay as they were. A job that cannot be saved says why in the words the jobs file is read with, and the reason stays until you change the job. An empty working directory or prompt path is refused. A working directory that is not there, or an agent that is not on the `PATH`, is a note and does not stop the save, since `otto sync` checks both. If the file changed on disk while the form was open, the save is refused and the list is read again.
 
@@ -162,6 +163,25 @@ Pause and skip need the unit `otto sync` writes today. After upgrading otto, run
 
 otto keeps the newest 50 runs of each job, in `~/.local/state/otto/jobs/<job>/` (`$XDG_STATE_HOME/otto/jobs` when that is set): a small file per run and its output beside it. Removing a job from the jobs file keeps its history. What otto itself prints during a scheduled run, such as a prompt file it could not read, goes to `~/.local/state/otto/logs/<job>.log`.
 
+## Notifications
+
+A run that needs your attention shows a notification on the machine it ran on. How much a job tells is its `notify`:
+
+| `notify` | Tells when |
+| --- | --- |
+| `off` | never |
+| `failures` | a run failed; this is what a job without `notify` does |
+| `finish` | a run ended, as `ok` or `failed` |
+| `all` | also when a run started, was skipped, or the job was paused |
+
+The notification names the job and what happened, `linear-updates failed`, and under it the exit code and how long the run took, or why it never started.
+
+otto uses what the system already has: `osascript` on macOS, `notify-send` on Linux, a PowerShell toast on Windows. On macOS the notification therefore comes in the name of Script Editor, and the first one may ask you to allow it. A notification that cannot be shown never changes a run: the reason is a line starting with `otto:` in the output of the run. otto waits five seconds for the system to take one and then goes on without it.
+
+Two things a notification does not know. A run that was interrupted, because the machine went down or the process was killed, tells nothing: no otto was left to tell. And an agent that exits with 0 without having done its job is an `ok` run, as it is everywhere else in otto.
+
+`notify` is read when the job runs. Changing it needs no `otto sync`, and the terminal UI has it as the last field of a job.
+
 ## Windows (experimental)
 
 On Windows a job is a task in Task Scheduler, in a folder named `otto`. Install with `npm install -g @tarcisiopgs/otto`, or take the `.zip` of a release. The commands are the same.
@@ -192,7 +212,6 @@ Requires Rust 1.88 or newer.
 
 ## Roadmap
 
-- Notifications when a run starts, finishes, fails or is skipped.
 - Prechecks (a command that decides whether today's run happens) and a missed-run grace window.
 - Windows out of experimental, with Scoop and winget packages.
 

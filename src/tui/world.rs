@@ -787,6 +787,7 @@ schedule = { at = \"07:00\" }
             at: "02:00".to_owned(),
             days: Vec::new(),
             args: Vec::new(),
+            notify: crate::notify::Level::default(),
         }
     }
 
@@ -1416,6 +1417,7 @@ mod unix_tests {
             at: "02:00".to_owned(),
             days: Vec::new(),
             args: Vec::new(),
+            notify: crate::notify::Level::default(),
         };
         assert!(real.warnings(&here).is_empty());
         let codex = JobSpec {

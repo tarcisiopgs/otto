@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::agent::Agent;
+use crate::notify::Level;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +28,9 @@ pub struct Job {
     /// Extra arguments for the agent CLI, placed before the prompt.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Which of its runs the job tells the user about.
+    #[serde(default)]
+    pub notify: Level,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -261,6 +265,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.job("nightly").unwrap().schedule.days.len(), 7);
+    }
+
+    fn with_notify(line: &str) -> String {
+        format!(
+            "[jobs.nightly]\nagent = \"codex\"\nprompt = \"/p.md\"\nworkdir = \"/w\"\nschedule = {{ at = \"02:30\" }}\n{line}"
+        )
+    }
+
+    #[test]
+    fn a_job_without_notify_tells_of_failures() {
+        let config = parse(EXAMPLE).unwrap();
+        assert_eq!(
+            config.job("morning-triage").unwrap().notify,
+            Level::Failures
+        );
+        // The other job of the example says how it tells.
+        assert_eq!(config.job("linear-updates").unwrap().notify, Level::Finish);
+        let config = parse(&with_notify("")).unwrap();
+        assert_eq!(config.job("nightly").unwrap().notify, Level::Failures);
+    }
+
+    #[test]
+    fn a_job_chooses_its_level() {
+        for level in Level::ALL {
+            let text = with_notify(&format!("notify = \"{}\"\n", level.label()));
+            assert_eq!(parse(&text).unwrap().job("nightly").unwrap().notify, level);
+        }
+    }
+
+    #[test]
+    fn an_unknown_level_is_refused_with_the_ones_that_exist() {
+        let error = parse(&with_notify("notify = \"sometimes\"\n")).unwrap_err();
+        let said = format!("{error:#}");
+        // Where it is in the file is the line the parser shows, as for an
+        // agent that does not exist.
+        for word in ["sometimes", "off", "failures", "finish", "all", "line 6"] {
+            assert!(said.contains(word), "{word}: {said}");
+        }
     }
 
     #[test]

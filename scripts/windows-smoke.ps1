@@ -23,7 +23,12 @@ agent = "claude"
 prompt = "prompt.md"
 workdir = "job"
 schedule = { at = "03:00" }
+notify = "all"
 "@
+# `notify = "all"` makes the run ask for a toast when it starts and when it
+# ends. A runner has no desktop to show one on: what is checked is that the
+# run ends as it would without it. A toast that could not be shown says so in
+# the output of the run, which `otto log` prints below.
 
 # Task Scheduler starts a task with the environment the user has in the
 # registry, not with this shell's, so the fake agent goes on both.
@@ -57,7 +62,13 @@ do {
 Write-Host "> otto runs demo`n$runs"
 schtasks /Query /TN 'otto\demo' /V /FO LIST | Select-String 'Last Run|Last Result|Status'
 Expect $runs 'scheduled\s+ok'
-Expect (Otto log demo) 'fake agent got 2 arguments'
+$log = Otto log demo
+Expect $log 'fake agent got 2 arguments'
+# The toast may have nowhere to show, but the script that asks for it must be
+# one PowerShell can read.
+if ($log -match 'ParserError|Unexpected token|is not recognized') {
+    throw "the notification script is not valid PowerShell:`n$log"
+}
 Expect (Otto list) 'demo.*active\s+ok'
 
 (Get-Content $config) -replace '03:00', '04:30' | Set-Content $config

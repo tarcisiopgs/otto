@@ -909,6 +909,7 @@ mod tests {
                     days: Weekday::every_day(),
                 },
                 args: Vec::new(),
+                notify: crate::notify::Level::default(),
             },
             state: State::default(),
             runs: Vec::new(),

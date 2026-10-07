@@ -8,6 +8,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::agent::Agent;
 use crate::config::Weekday;
 use crate::jobs_file::{self, JobSpec};
+use crate::notify::Level;
 
 /// A line of text being edited. The cursor is a place in the text, always
 /// between two things that read as one character each.
@@ -94,10 +95,11 @@ pub enum Focus {
     Days,
     Args,
     Prompt,
+    Notify,
 }
 
 /// The order the fields are walked in.
-const ORDER: [Focus; 7] = [
+const ORDER: [Focus; 8] = [
     Focus::Name,
     Focus::Agent,
     Focus::At,
@@ -105,6 +107,7 @@ const ORDER: [Focus; 7] = [
     Focus::Workdir,
     Focus::Prompt,
     Focus::Args,
+    Focus::Notify,
 ];
 
 /// One keystroke of editing, whichever key it was.
@@ -142,6 +145,8 @@ pub struct Form {
     /// edited: what is read back from a field is only what it can hold.
     written_args: Option<Vec<String>>,
     pub prompt: Field,
+    /// Which runs the job tells of.
+    pub notify: Level,
     /// The jobs file as it was when the form opened.
     pub read: String,
     /// The prompt path is still the one made from the name.
@@ -167,6 +172,7 @@ impl Form {
             args_by_hand: false,
             written_args: None,
             prompt: Field::new(""),
+            notify: Level::default(),
             read,
             prompt_follows: true,
             opened_with: (
@@ -178,6 +184,7 @@ impl Form {
                     at: String::new(),
                     days: Vec::new(),
                     args: Vec::new(),
+                    notify: Level::default(),
                 },
             ),
         };
@@ -217,6 +224,7 @@ impl Form {
             args_by_hand,
             written_args: Some(spec.args.clone()),
             prompt: Field::new(&spec.prompt),
+            notify: spec.notify,
             read,
             prompt_follows: false,
             opened_with: (name.to_owned(), spec),
@@ -254,6 +262,7 @@ impl Form {
                     .map(str::to_owned)
                     .collect(),
             },
+            notify: self.notify,
         }
     }
 
@@ -296,7 +305,8 @@ impl Form {
         self.step(self.reachable().len() - 1);
     }
 
-    /// The next agent, or the day under the cursor on or off.
+    /// The next agent or the next level, or the day under the cursor on or
+    /// off.
     pub fn toggle(&mut self) {
         match self.focus {
             Focus::Agent => {
@@ -304,6 +314,10 @@ impl Form {
                 self.agent = Agent::ALL[at.map_or(0, |at| (at + 1) % Agent::ALL.len())];
             }
             Focus::Days => self.days[self.day] = !self.days[self.day],
+            Focus::Notify => {
+                let at = Level::ALL.iter().position(|level| *level == self.notify);
+                self.notify = Level::ALL[at.map_or(0, |at| (at + 1) % Level::ALL.len())];
+            }
             _ => {}
         }
     }
@@ -332,6 +346,21 @@ impl Form {
             Focus::Name if self.editing.is_some() => return,
             // Typing here would replace arguments the field cannot show.
             Focus::Args if self.args_by_hand => return,
+            // Chosen too, and in an order: left is less and right is more.
+            Focus::Notify => {
+                let at = Level::ALL
+                    .iter()
+                    .position(|level| *level == self.notify)
+                    .unwrap_or(0);
+                self.notify = match edit {
+                    Edit::Left => Level::ALL[at.saturating_sub(1)],
+                    Edit::Right => Level::ALL[(at + 1).min(Level::ALL.len() - 1)],
+                    Edit::Home => Level::ALL[0],
+                    Edit::End => Level::ALL[Level::ALL.len() - 1],
+                    _ => self.notify,
+                };
+                return;
+            }
             Focus::Name => &mut self.name,
             Focus::Workdir => &mut self.workdir,
             Focus::At => &mut self.at,
@@ -536,11 +565,11 @@ mod tests {
     #[test]
     fn the_name_cannot_be_reached_or_changed_while_editing() {
         let mut form = Form::edit(SAMPLE.to_owned(), "linear-updates").unwrap();
-        form.focus = Focus::Args;
+        form.focus = Focus::Notify;
         form.next_field();
         assert_eq!(form.focus, Focus::Agent);
         form.prev_field();
-        assert_eq!(form.focus, Focus::Args);
+        assert_eq!(form.focus, Focus::Notify);
         // Even put there, typing does nothing.
         form.focus = Focus::Name;
         typed(&mut form, "x");
@@ -551,7 +580,7 @@ mod tests {
     fn the_fields_come_in_one_order_and_wrap() {
         let mut form = Form::create(SAMPLE.to_owned());
         let mut seen = vec![form.focus];
-        for _ in 0..7 {
+        for _ in 0..8 {
             form.next_field();
             seen.push(form.focus);
         }
@@ -565,11 +594,12 @@ mod tests {
                 Focus::Workdir,
                 Focus::Prompt,
                 Focus::Args,
+                Focus::Notify,
                 Focus::Name
             ]
         );
         form.prev_field();
-        assert_eq!(form.focus, Focus::Args);
+        assert_eq!(form.focus, Focus::Notify);
     }
 
     #[test]
@@ -709,5 +739,91 @@ mod tests {
         let mut nameless = nightly();
         nameless.name = Field::new("");
         assert!(nameless.result().is_err());
+    }
+
+    #[test]
+    fn a_new_form_tells_of_failures() {
+        let form = Form::create(String::new());
+        assert_eq!(form.notify, Level::Failures);
+        assert_eq!(form.spec().notify, Level::Failures);
+        assert!(!form.dirty());
+    }
+
+    #[test]
+    fn the_level_comes_last_in_the_order_of_the_fields() {
+        let mut form = Form::create(String::new());
+        form.prev_field();
+        assert_eq!(form.focus, Focus::Notify);
+        form.next_field();
+        assert_eq!(form.focus, Focus::Name);
+        form.focus = Focus::Args;
+        form.next_field();
+        assert_eq!(form.focus, Focus::Notify);
+    }
+
+    #[test]
+    fn the_level_is_chosen_not_typed() {
+        let mut form = Form::create(String::new());
+        form.focus = Focus::Notify;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            form.input(Edit::Right);
+            seen.push(form.notify);
+        }
+        // It stops at each end.
+        assert_eq!(seen, [Level::Finish, Level::All, Level::All]);
+        seen.clear();
+        for _ in 0..4 {
+            form.input(Edit::Left);
+            seen.push(form.notify);
+        }
+        assert_eq!(
+            seen,
+            [Level::Finish, Level::Failures, Level::Off, Level::Off]
+        );
+        typed(&mut form, "all");
+        form.input(Edit::Backspace);
+        assert_eq!(form.notify, Level::Off);
+        // The space bar goes on to the next, and round.
+        let mut marked = Vec::new();
+        for _ in 0..4 {
+            form.toggle();
+            marked.push(form.notify);
+        }
+        assert_eq!(
+            marked,
+            [Level::Failures, Level::Finish, Level::All, Level::Off]
+        );
+    }
+
+    #[test]
+    fn changing_only_the_level_makes_the_form_dirty_and_writes_one_key() {
+        let mut form = Form::edit(SAMPLE.to_owned(), "morning-triage").unwrap();
+        assert_eq!(form.notify, Level::Failures);
+        assert!(!form.dirty());
+        form.focus = Focus::Notify;
+        form.input(Edit::Right);
+        assert!(form.dirty());
+        assert_eq!(
+            form.result().unwrap(),
+            format!("{SAMPLE}notify = \"finish\"\n")
+        );
+    }
+
+    #[test]
+    fn editing_another_field_of_a_job_without_the_key_adds_none() {
+        let mut form = Form::edit(SAMPLE.to_owned(), "morning-triage").unwrap();
+        form.focus = Focus::At;
+        form.input(Edit::Backspace);
+        form.input(Edit::Insert('5'));
+        let text = form.result().unwrap();
+        assert_eq!(text, SAMPLE.replace("07:00", "07:05"));
+    }
+
+    #[test]
+    fn a_form_opens_with_the_level_the_file_has() {
+        let form = Form::edit(SAMPLE.to_owned(), "linear-updates").unwrap();
+        assert_eq!(form.notify, Level::Finish);
+        assert_eq!(form.result().unwrap(), SAMPLE);
     }
 }

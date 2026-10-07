@@ -15,6 +15,7 @@ use toml_edit::{Document, InlineTable, Item, Key, Table, TableLike, Value};
 use crate::agent::Agent;
 use crate::atomic;
 use crate::config::{self, Config, Weekday};
+use crate::notify::Level;
 
 /// A job as the user writes it: paths as typed, not resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,9 @@ pub struct JobSpec {
     /// None and all seven both mean every day.
     pub days: Vec<Weekday>,
     pub args: Vec<String>,
+    /// Which runs the job tells of. The one a job has without saying so is
+    /// not written.
+    pub notify: Level,
 }
 
 impl JobSpec {
@@ -400,6 +404,16 @@ pub fn read(text: &str, name: &str) -> Result<JobSpec> {
             .collect::<Option<Vec<Weekday>>>()
             .with_context(|| format!("job {name}: schedule.days has a day otto does not know"))?,
     };
+    let notify = match job.get("notify") {
+        None => Level::default(),
+        Some(_) => {
+            let level = string(job, "notify")?;
+            Level::ALL
+                .into_iter()
+                .find(|known| known.label() == level)
+                .with_context(|| format!("job {name}: no notify level named {level:?}"))?
+        }
+    };
     Ok(JobSpec {
         agent,
         prompt: string(job, "prompt")?,
@@ -407,11 +421,13 @@ pub fn read(text: &str, name: &str) -> Result<JobSpec> {
         at: string(schedule, "at")?,
         days,
         args: strings(job, "args")?.unwrap_or_default(),
+        notify,
     })
 }
 
 /// `text` with a new job at its end. The block always has the same shape:
-/// agent, prompt, workdir, schedule and, when there are any, args.
+/// agent, prompt, workdir, schedule and, when there are any, args, and then
+/// how it tells of its runs when that is not what a job does anyway.
 pub fn add(text: &str, name: &str, spec: &JobSpec) -> Result<String> {
     // Checked here: a name that is not a bare key would not even parse below.
     if !config::is_job_name(name) {
@@ -446,6 +462,9 @@ pub fn add(text: &str, name: &str, spec: &JobSpec) -> Result<String> {
             "args = {}",
             list(spec.args.iter().map(String::as_str))
         ));
+    }
+    if spec.notify != Level::default() {
+        lines.push(format!("notify = {}", literal(spec.notify.label())));
     }
 
     // One blank line between what is there and the new job, and no more.
@@ -517,6 +536,17 @@ pub fn update(text: &str, name: &str, spec: &JobSpec) -> Result<String> {
             (true, true) => delete(text, schedule, "days")?,
             (true, false) => (value(schedule, "days")?, days),
             (false, _) => insert(text, schedule, "days", &days)?,
+        });
+    }
+    // Before the arguments: of two keys added at the end of the job, the one
+    // asked for last is the one written first.
+    if old.notify != spec.notify {
+        let level = literal(spec.notify.label());
+        let written = job.entry("notify").is_some();
+        edits.push(match (written, spec.notify == Level::default()) {
+            (true, true) => delete(text, job, "notify")?,
+            (true, false) => (value(job, "notify")?, level),
+            (false, _) => insert(text, job, "notify", &level)?,
         });
     }
     if old.args != spec.args {
@@ -725,6 +755,7 @@ mod tests {
             at: "02:00".to_owned(),
             days: vec![Weekday::Mon, Weekday::Wed],
             args: vec!["--model".to_owned(), "x".to_owned()],
+            notify: Level::default(),
         }
     }
 
@@ -950,6 +981,21 @@ mod tests {
                     days: Vec::new(),
                     args: Vec::new(),
                     at: "23:59".to_owned(),
+                    ..written.clone()
+                },
+                JobSpec {
+                    notify: Level::All,
+                    ..written.clone()
+                },
+                JobSpec {
+                    notify: Level::Off,
+                    args: Vec::new(),
+                    ..written.clone()
+                },
+                JobSpec {
+                    notify: Level::Finish,
+                    args: vec!["x".to_owned()],
+                    days: vec![Weekday::Sun],
                     ..written.clone()
                 },
             ];
@@ -1202,6 +1248,7 @@ schedule = { at = \"09:00\" }
                 at: "16:05".to_owned(),
                 days: WEEKDAYS.to_vec(),
                 args: vec!["--permission-mode".to_owned(), "auto".to_owned()],
+                notify: Level::Finish,
             }
         );
         let triage = read(SAMPLE, "morning-triage").unwrap();
@@ -1296,6 +1343,106 @@ schedule = { at = \"09:00\" }
         let text = update(SAMPLE, "morning-triage", &some).unwrap();
         assert!(text.contains("args = [\"--model\", \"x\"]\n"), "{text}");
         assert_eq!(read(&text, "morning-triage").unwrap(), some);
+    }
+
+    #[test]
+    fn a_job_without_the_key_reads_as_failures() {
+        assert_eq!(
+            read(SAMPLE, "morning-triage").unwrap().notify,
+            Level::Failures
+        );
+        assert_eq!(
+            read(SAMPLE, "linear-updates").unwrap().notify,
+            Level::Finish
+        );
+    }
+
+    #[test]
+    fn a_level_otto_does_not_know_is_said_with_the_job() {
+        let text = SAMPLE.replace("\"finish\"", "\"sometimes\"");
+        let error = read(&text, "linear-updates").unwrap_err();
+        let said = format!("{error:#}");
+        assert!(said.contains("linear-updates"), "{said}");
+        assert!(said.contains("sometimes"), "{said}");
+    }
+
+    #[test]
+    fn a_level_that_is_not_the_default_is_written() {
+        let louder = JobSpec {
+            notify: Level::All,
+            ..read(SAMPLE, "morning-triage").unwrap()
+        };
+        let text = update(SAMPLE, "morning-triage", &louder).unwrap();
+        assert_eq!(text, format!("{SAMPLE}notify = \"all\"\n"));
+        assert_eq!(read(&text, "morning-triage").unwrap(), louder);
+    }
+
+    #[test]
+    fn a_level_changes_where_it_is() {
+        let quiet = JobSpec {
+            notify: Level::Off,
+            ..read(SAMPLE, "linear-updates").unwrap()
+        };
+        let text = update(SAMPLE, "linear-updates", &quiet).unwrap();
+        assert_eq!(text, SAMPLE.replace("\"finish\"", "\"off\""));
+    }
+
+    #[test]
+    fn going_back_to_the_default_drops_the_key() {
+        let plain = JobSpec {
+            notify: Level::Failures,
+            ..read(SAMPLE, "linear-updates").unwrap()
+        };
+        let text = update(SAMPLE, "linear-updates", &plain).unwrap();
+        // The line goes; the comment above it is the user's and stays.
+        assert_eq!(text, SAMPLE.replace("notify = \"finish\"\n", ""));
+        assert_eq!(read(&text, "linear-updates").unwrap(), plain);
+    }
+
+    #[test]
+    fn the_default_written_out_is_left_as_it_is() {
+        let text = SAMPLE.replace("\"finish\"", "\"failures\"");
+        let same = read(&text, "linear-updates").unwrap();
+        assert_eq!(same.notify, Level::Failures);
+        assert_eq!(update(&text, "linear-updates", &same).unwrap(), text);
+        // And another change does not take it out.
+        let later = JobSpec {
+            at: "17:00".to_owned(),
+            ..same
+        };
+        let changed = update(&text, "linear-updates", &later).unwrap();
+        assert!(changed.contains("notify = \"failures\""), "{changed}");
+    }
+
+    #[test]
+    fn arguments_and_a_level_added_at_once_keep_their_order() {
+        let both = JobSpec {
+            args: vec!["--model".to_owned(), "x".to_owned()],
+            notify: Level::All,
+            ..read(SAMPLE, "morning-triage").unwrap()
+        };
+        let text = update(SAMPLE, "morning-triage", &both).unwrap();
+        assert!(
+            text.ends_with("args = [\"--model\", \"x\"]\nnotify = \"all\"\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_new_job_writes_the_level_after_the_arguments() {
+        let spec = JobSpec {
+            notify: Level::Finish,
+            ..nightly()
+        };
+        let text = add(SAMPLE, "nightly", &spec).unwrap();
+        assert!(
+            text.ends_with("args = [\"--model\", \"x\"]\nnotify = \"finish\"\n"),
+            "{text}"
+        );
+        assert_eq!(read(&text, "nightly").unwrap(), spec);
+        // The level a job has anyway is not written.
+        let text = add(SAMPLE, "nightly", &nightly()).unwrap();
+        assert!(text.ends_with("args = [\"--model\", \"x\"]\n"), "{text}");
     }
 
     #[test]

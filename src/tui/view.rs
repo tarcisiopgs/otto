@@ -10,6 +10,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::agent::Agent;
 use crate::config::{Schedule, Weekday};
 use crate::next::{self, Next};
+use crate::notify::Level;
 use crate::store::{Outcome, Run};
 use crate::sync;
 use crate::tui::app::{App, Confirm, ENTRY, Screen};
@@ -23,8 +24,8 @@ pub const MIN: (u16, u16) = (60, 12);
 /// How many of a job's latest runs its strip of marks shows.
 const STRIP: usize = 8;
 
-/// The rows of the job screen above its runs: the entry, three facts, a rule.
-const SHEET: usize = 6;
+/// The rows of the job screen above its runs: the entry, four facts, a rule.
+const SHEET: usize = 7;
 
 /// The columns kept for how the last run ended, so that the strips of every
 /// job end in the same column.
@@ -409,10 +410,17 @@ fn first_line<'a>(job: &'a JobView, chosen: bool, marker: bool, width: usize) ->
 }
 
 /// The rows the job screen spends above its runs when `left` are free: the
-/// whole sheet, or only the entry and the rule when the runs would be left
-/// with too few.
+/// whole sheet; a row short of it, the sheet without how the job tells of
+/// its runs; and only the entry and the rule when the runs would be left with
+/// too few.
 fn sheet(left: usize) -> usize {
-    if left >= SHEET + RUNS { SHEET } else { ENTRY }
+    if left >= SHEET + RUNS {
+        SHEET
+    } else if left >= SHEET - 1 + RUNS {
+        SHEET - 1
+    } else {
+        ENTRY
+    }
 }
 
 /// The first of the rows to draw so that row `selected` is among `visible`.
@@ -534,7 +542,8 @@ fn job<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a>
     let pending = app.snapshot.pending_for(&job.name);
     lines.push(second_line(job, pending, now, width));
     // On a short terminal the facts give way to the runs.
-    if sheet(rows.saturating_sub(lines.len() - 2)) == SHEET {
+    let spent = sheet(rows.saturating_sub(lines.len() - 2));
+    if spent > ENTRY {
         lines.push(fact(
             "workdir",
             tail(&job.job.workdir.display().to_string(), room),
@@ -544,6 +553,9 @@ fn job<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a>
             tail(&job.job.prompt.display().to_string(), room),
         ));
         lines.push(fact("args", cut(&args, room)));
+    }
+    if spent == SHEET {
+        lines.push(fact("notify", job.job.notify.label().to_owned()));
     }
     lines.push(rule(width));
 
@@ -735,6 +747,7 @@ fn fields(form: &Form, width: usize) -> (Vec<Line<'_>>, (usize, usize)) {
         (Focus::Workdir, "workdir"),
         (Focus::Prompt, "prompt"),
         (Focus::Args, "args"),
+        (Focus::Notify, "notify"),
     ];
     for (row, (focus, label)) in order.into_iter().enumerate() {
         let focused = form.focus == focus;
@@ -753,7 +766,7 @@ fn fields(form: &Form, width: usize) -> (Vec<Line<'_>>, (usize, usize)) {
             Focus::At => Some(&form.at),
             Focus::Args => Some(&form.args),
             Focus::Prompt => Some(&form.prompt),
-            Focus::Agent | Focus::Days => None,
+            Focus::Agent | Focus::Days | Focus::Notify => None,
         };
         match (focus, text) {
             // Arguments the field cannot hold are not shown as if it could.
@@ -781,6 +794,17 @@ fn fields(form: &Form, width: usize) -> (Vec<Line<'_>>, (usize, usize)) {
                     spans.extend(choice(agent.program(), agent == form.agent));
                 }
             }
+            (Focus::Notify, _) => {
+                for (index, level) in Level::ALL.into_iter().enumerate() {
+                    if index > 0 {
+                        spans.push(Span::raw("  "));
+                    }
+                    if level == form.notify {
+                        column = width_of(&spans) - VALUE;
+                    }
+                    spans.extend(choice(level.label(), level == form.notify));
+                }
+            }
             (_, None) => {
                 for (index, day) in DAYS.into_iter().enumerate() {
                     if index > 0 {
@@ -802,6 +826,8 @@ fn fields(form: &Form, width: usize) -> (Vec<Line<'_>>, (usize, usize)) {
         }
         lines.push(Line::from(spans));
     }
+    // On the smallest terminal the fields take every row, and this rule is
+    // cut off by the height of the body.
     lines.push(rule(width));
     (lines, cursor)
 }
@@ -820,6 +846,12 @@ fn hint(form: &Form) -> Option<&'static str> {
             Some("these arguments can only be changed in the jobs file")
         }
         Focus::Args => Some("a scheduled run has nobody to answer a permission prompt"),
+        Focus::Notify => Some(match form.notify {
+            Level::Off => "never tells",
+            Level::Failures => "tells when a run fails",
+            Level::Finish => "tells when a run ends, ok or failed",
+            Level::All => "tells when a run starts, ends or does not happen",
+        }),
     }
 }
 
@@ -905,7 +937,9 @@ fn notice(app: &App, width: usize) -> Line<'_> {
         }
         let note = || format!("note: {}", app.warnings.join("; "));
         let text = match (form.focus, hint(form)) {
-            (Focus::Args, Some(hint)) => hint.to_owned(),
+            // Never out of sight on these two: what the arguments are for,
+            // and what the level under the cursor does.
+            (Focus::Args | Focus::Notify, Some(hint)) => hint.to_owned(),
             _ if !app.warnings.is_empty() => note(),
             (_, Some(hint)) => hint.to_owned(),
             (_, None) => return Line::default(),
@@ -1046,7 +1080,7 @@ fn bar(app: &App, width: usize) -> Line<'_> {
         Screen::Form => {
             let mut keys: Vec<Key> = vec![("tab", "next")];
             match app.form.as_ref().map(|form| form.focus) {
-                Some(Focus::Agent | Focus::Days) => {
+                Some(Focus::Agent | Focus::Days | Focus::Notify) => {
                     keys.extend([("←→", "move"), ("space", "mark")])
                 }
                 // A line of its own for the next argument, where the field
@@ -1108,6 +1142,7 @@ mod tests {
     use crate::agent::Agent;
     use crate::config::{Job, Schedule, Weekday};
     use crate::next::Next;
+    use crate::notify::Level;
     use crate::store::{Outcome, Run, State, Trigger};
     use crate::sync;
     use crate::tui::app::{Action, Notice};
@@ -1159,6 +1194,7 @@ mod tests {
                     ],
                 },
                 args: vec!["--model".to_owned(), "sonnet".to_owned()],
+                notify: crate::notify::Level::default(),
             },
             state: State::default(),
             runs: Vec::new(),
@@ -1732,7 +1768,8 @@ mod tests {
         assert!(lines[entry + 2].starts_with(" │ workdir"), "{text}");
         assert!(lines[entry + 3].starts_with(" │ prompt"));
         assert!(lines[entry + 4].starts_with(" │ args"));
-        assert!(lines[entry + 5].starts_with(" ├──"));
+        assert_eq!(lines[entry + 5].trim_end(), " │ notify   failures");
+        assert!(lines[entry + 6].starts_with(" ├──"));
     }
 
     #[test]
@@ -1894,6 +1931,8 @@ mod tests {
             Some(" otto · edit linear-updates")
         );
         // In the order an entry reads: what and when, then where and with what.
+        // The smallest terminal has a row for each field and none for the
+        // rule under them.
         assert_eq!(
             &lines[2..10],
             [
@@ -1904,9 +1943,13 @@ mod tests {
                 " │ workdir  ~/Workspace/app",
                 " │ prompt   prompts/linear-updates.md",
                 " │ args     --permission-mode ⏎ auto",
-                " ├─────────────────────────────────────────────────────────",
+                " │ notify   ·off  ·failures  ✓finish  ·all",
             ]
         );
+        let taller = screen(&app, 78, 20);
+        let tall: Vec<&str> = taller.lines().collect();
+        assert!(tall[9].starts_with(" │ notify"), "{taller}");
+        assert!(tall[10].starts_with(" ├──"), "{taller}");
         assert_eq!(
             lines[11],
             " tab next  ←→ move  space mark  ctrl-s save  esc cancel"
@@ -2430,5 +2473,91 @@ mod tests {
         for row in text.lines() {
             assert!(width_in_columns(row.trim_end()) < 60, "{row}");
         }
+    }
+
+    #[test]
+    fn the_level_in_focus_says_what_it_does() {
+        let said = [
+            (Level::Off, " never tells"),
+            (Level::Failures, " tells when a run fails"),
+            (Level::Finish, " tells when a run ends, ok or failed"),
+            (
+                Level::All,
+                " tells when a run starts, ends or does not happen",
+            ),
+        ];
+        for (level, words) in said {
+            let mut app = creating("nightly");
+            let form = app.form.as_mut().unwrap();
+            form.focus = Focus::Notify;
+            form.notify = level;
+            let (text, cursor) = screen_and_cursor(&app, MIN.0, MIN.1);
+            let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+            assert!(lines[9].starts_with("▸│ notify   "), "{text}");
+            assert_eq!(lines[10], words, "{text}");
+            assert_eq!(
+                lines[11],
+                " tab next  ←→ move  space mark  ctrl-s save  esc cancel"
+            );
+            // The cursor is on the level that is chosen.
+            let chosen = format!("✓{}", level.label());
+            let column = width_in_columns(&lines[9][..lines[9].find(&chosen).unwrap()]);
+            assert_eq!(cursor, (column as u16, 9), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_form_fits_the_smallest_terminal_on_every_field() {
+        let mut app = creating("nightly");
+        for _ in 0..8 {
+            let (text, cursor) = screen_and_cursor(&app, MIN.0, MIN.1);
+            for row in text.lines() {
+                assert!(width_in_columns(row.trim_end()) < 60, "{row}");
+            }
+            let row = text.lines().nth(usize::from(cursor.1)).unwrap();
+            assert!(row.starts_with('▸'), "{text}");
+            app.act(Action::NextField);
+        }
+    }
+
+    #[test]
+    fn the_job_screen_says_how_the_job_tells() {
+        let louder = JobView {
+            job: Job {
+                notify: Level::All,
+                ..job("report").job
+            },
+            ..job("report")
+        };
+        let mut app = app(vec![louder]);
+        app.act(Action::Open);
+        let text = screen(&app, 78, 20);
+        assert!(text.contains(" │ notify   all"), "{text}");
+    }
+
+    #[test]
+    fn how_a_job_tells_is_the_first_fact_to_give_way() {
+        let app = on_the_job();
+        // A row short of the whole sheet: what the screen showed before the
+        // job had this fact.
+        let short = screen(&app, 60, 13);
+        assert!(short.contains(" │ args"), "{short}");
+        assert!(!short.contains(" │ notify"), "{short}");
+        assert!(short.contains("▸ ✓"), "{short}");
+        let enough = screen(&app, 60, 14);
+        assert!(enough.contains(" │ args"), "{enough}");
+        assert!(enough.contains(" │ notify"), "{enough}");
+    }
+
+    #[test]
+    fn what_a_level_does_is_said_whatever_else_there_is_to_say() {
+        let mut app = creating("nightly");
+        app.warnings = vec!["codex not found in PATH".to_owned()];
+        let text = screen(&app, 78, 20);
+        assert!(text.contains(" note: codex not found in PATH"), "{text}");
+        app.form.as_mut().unwrap().focus = Focus::Notify;
+        let text = screen(&app, 78, 20);
+        assert!(text.contains(" tells when a run fails"), "{text}");
+        assert!(!text.contains("note:"), "{text}");
     }
 }
