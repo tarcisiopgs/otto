@@ -101,6 +101,7 @@ fn context(config_path: &Path) -> Result<scheduler::Context> {
             .with_context(|| format!("cannot resolve {}", config_path.display()))?,
         path,
         log_dir: config::log_dir()?,
+        version: env!("CARGO_PKG_VERSION"),
     })
 }
 

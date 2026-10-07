@@ -41,6 +41,8 @@ pub struct Context {
     /// so the agent CLI and its tools would not be found without it.
     pub path: String,
     pub log_dir: PathBuf,
+    /// The version of the otto that writes the unit.
+    pub version: &'static str,
 }
 
 impl Context {

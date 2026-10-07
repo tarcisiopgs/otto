@@ -107,10 +107,15 @@ impl Scheduler for Launchd {
                 )
             })
             .collect();
+        // The version is written so that an upgraded otto has a job to reload.
+        // At login launchd pins an agent to the binary it finds, and kills the
+        // run when an upgrade has put another one at the same path; loading
+        // the agent again drops the pin.
         let contents = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- otto {version} -->
 <dict>
 	<key>Label</key>
 	<string>{label}</string>
@@ -146,6 +151,7 @@ impl Scheduler for Launchd {
             job_name = escape(job_name),
             path = escape(&ctx.path),
             log = escape(&log.to_string_lossy()),
+            version = escape(ctx.version),
         );
         Ok(vec![Unit {
             path: self.agents_dir.join(format!("{label}.plist")),
@@ -297,6 +303,7 @@ mod tests {
             config: PathBuf::from("/Users/me/.config/otto/jobs.toml"),
             path: "/Users/me/.local/bin:/opt/a<b/bin".to_owned(),
             log_dir: PathBuf::from("/Users/me/.local/state/otto/logs"),
+            version: "1.2.3",
         };
         let units = launchd
             .units("report", config.job("report").unwrap(), &ctx)
@@ -343,5 +350,42 @@ mod tests {
         );
         assert!(plist.contains("<key>StandardOutPath</key>"));
         assert!(plist.contains("<key>StandardErrorPath</key>"));
+    }
+
+    #[test]
+    fn another_otto_writes_another_plist() {
+        let config = Config::parse(
+            "[jobs.report]\nagent = \"claude\"\nprompt = \"/p.md\"\nworkdir = \"/w\"\nschedule = { at = \"16:05\" }\n",
+            Path::new("/"),
+            None,
+        )
+        .unwrap();
+        let launchd = Launchd {
+            agents_dir: PathBuf::from("/Users/me/Library/LaunchAgents"),
+        };
+        let plist = |version: &'static str| {
+            let ctx = Context {
+                otto: PathBuf::from("/opt/homebrew/bin/otto"),
+                config: PathBuf::from("/Users/me/.config/otto/jobs.toml"),
+                path: "/usr/bin".to_owned(),
+                log_dir: PathBuf::from("/Users/me/.local/state/otto/logs"),
+                version,
+            };
+            launchd
+                .units("report", config.job("report").unwrap(), &ctx)
+                .unwrap()
+        };
+
+        let written = plist("0.5.0");
+        assert!(written[0].contents.contains("<!-- otto 0.5.0 -->"));
+        assert_eq!(written, plist("0.5.0"));
+
+        // The path of the binary is the same after an upgrade, so the version
+        // is what makes the sync see a job to reload.
+        let upgraded = plist("0.6.0");
+        assert_eq!(
+            crate::sync::decide(&upgraded, &[Some(written[0].contents.clone())]),
+            crate::sync::Action::Update
+        );
     }
 }

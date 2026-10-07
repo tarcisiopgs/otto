@@ -280,6 +280,7 @@ mod tests {
             config: PathBuf::from("/home/me/my config/jobs.toml"),
             path: path.to_owned(),
             log_dir: PathBuf::from("/home/me/.local/state/otto/logs"),
+            version: "1.2.3",
         };
         systemd
             .units("report", config.job("report").unwrap(), &ctx)
