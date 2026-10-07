@@ -1,9 +1,11 @@
 //! Telling the user about a run: which runs a job tells of, and in what
 //! words.
 
+use anyhow::{Result, bail};
 use jiff::Zoned;
 use serde::Deserialize;
 
+use crate::scheduler::runner::{Runner, must};
 use crate::store::{Trigger, duration_label};
 
 /// How much a job tells of its runs.
@@ -121,9 +123,160 @@ pub fn message(job: &str, event: &Event) -> Message {
     }
 }
 
+/// Shows a message to the user.
+pub trait Notifier {
+    fn notify(&self, message: &Message) -> Result<()>;
+}
+
+/// The Notification Center, through `osascript`.
+pub struct Macos<'a> {
+    pub runner: &'a dyn Runner,
+}
+
+/// The desktop's notification service, through `notify-send`.
+pub struct Linux<'a> {
+    pub runner: &'a dyn Runner,
+}
+
+/// A toast, through PowerShell.
+pub struct Windows<'a> {
+    pub runner: &'a dyn Runner,
+}
+
+impl Notifier for Macos<'_> {
+    fn notify(&self, message: &Message) -> Result<()> {
+        // The words are arguments of the script, never part of its text:
+        // nothing in a job name or a reason is read as AppleScript.
+        must(
+            self.runner,
+            "osascript",
+            &[
+                "-e",
+                "on run argv",
+                "-e",
+                "display notification (item 2 of argv) with title (item 1 of argv)",
+                "-e",
+                "end run",
+                &message.title,
+                &message.body,
+            ],
+        )
+    }
+}
+
+impl Notifier for Linux<'_> {
+    fn notify(&self, message: &Message) -> Result<()> {
+        // After `--` nothing is an option, whatever it starts with.
+        must(
+            self.runner,
+            "notify-send",
+            &["--app-name=otto", "--", &message.title, &message.body],
+        )
+    }
+}
+
+/// The toast, with the words still to put in. It is shown in the name of
+/// PowerShell: a toast needs an application to belong to, and otto is none.
+const TOAST: &str = r"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$text = $xml.GetElementsByTagName('text')
+$text.Item(0).AppendChild($xml.CreateTextNode({title})) | Out-Null
+$text.Item(1).AppendChild($xml.CreateTextNode({body})) | Out-Null
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe').Show($toast)";
+
+/// `text` as a PowerShell string that nothing is expanded in.
+fn quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+impl Notifier for Windows<'_> {
+    fn notify(&self, message: &Message) -> Result<()> {
+        let script = TOAST
+            .replace("{title}", &quoted(&message.title))
+            .replace("{body}", &quoted(&message.body));
+        // Encoded, so that no quoting stands between otto and PowerShell.
+        let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        must(
+            self.runner,
+            "powershell",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &base64(&bytes),
+            ],
+        )
+    }
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let group = chunk
+            .iter()
+            .enumerate()
+            .fold(0_u32, |group, (index, byte)| {
+                group | u32::from(*byte) << (16 - 8 * index)
+            });
+        for index in 0..4 {
+            if index <= chunk.len() {
+                let six = (group >> (18 - 6 * index)) & 0x3f;
+                text.push(char::from(ALPHABET[six as usize]));
+            } else {
+                text.push('=');
+            }
+        }
+    }
+    text
+}
+
+/// A system otto has no way to notify on.
+struct Nowhere;
+
+impl Notifier for Nowhere {
+    fn notify(&self, _message: &Message) -> Result<()> {
+        bail!("otto cannot show a notification on this system")
+    }
+}
+
+/// The notifier of this system.
+pub fn native(runner: &dyn Runner) -> Box<dyn Notifier + '_> {
+    if cfg!(target_os = "macos") {
+        Box::new(Macos { runner })
+    } else if cfg!(target_os = "linux") {
+        Box::new(Linux { runner })
+    } else if cfg!(windows) {
+        Box::new(Windows { runner })
+    } else {
+        Box::new(Nowhere)
+    }
+}
+
+/// Keeps what it is asked to show, and can be made to fail.
+#[cfg(test)]
+#[derive(Default)]
+pub struct Recording {
+    pub told: std::cell::RefCell<Vec<Message>>,
+    pub broken: Option<String>,
+}
+
+#[cfg(test)]
+impl Notifier for Recording {
+    fn notify(&self, message: &Message) -> Result<()> {
+        if let Some(reason) = &self.broken {
+            bail!("{reason}");
+        }
+        self.told.borrow_mut().push(message.clone());
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::runner::Output;
 
     fn at() -> Zoned {
         "2026-10-07T07:00:00-03:00[America/Recife]".parse().unwrap()
@@ -266,5 +419,151 @@ mod tests {
             reason: Some("cannot start claude\n  no such file"),
         };
         assert_eq!(said(event).body, "cannot start claude no such file");
+    }
+
+    /// Keeps each command whole: the program and every argument.
+    #[derive(Default)]
+    struct Commands {
+        run: std::cell::RefCell<Vec<Vec<String>>>,
+        failing: bool,
+    }
+
+    impl Runner for Commands {
+        fn run(&self, program: &str, args: &[&str]) -> Result<Output> {
+            let mut command = vec![program.to_owned()];
+            command.extend(args.iter().map(|arg| (*arg).to_owned()));
+            self.run.borrow_mut().push(command);
+            Ok(Output {
+                success: !self.failing,
+                stdout: String::new(),
+                stderr: "not allowed".to_owned(),
+            })
+        }
+    }
+
+    fn awkward() -> Message {
+        Message {
+            title: "-job \"it's\" failed".to_owned(),
+            body: "exit 3, `x` \\ $HOME\nsecond".to_owned(),
+        }
+    }
+
+    fn only(commands: &Commands) -> Vec<String> {
+        let run = commands.run.borrow();
+        assert_eq!(run.len(), 1);
+        run[0].clone()
+    }
+
+    #[test]
+    fn macos_passes_the_words_as_arguments_of_the_script() {
+        let commands = Commands::default();
+        Macos { runner: &commands }.notify(&awkward()).unwrap();
+        let command = only(&commands);
+        assert_eq!(command[0], "osascript");
+        assert_eq!(command[command.len() - 2], awkward().title);
+        assert_eq!(command[command.len() - 1], awkward().body);
+        // Nothing of the message is in the text of the script.
+        let script = command[1..command.len() - 2].join(" ");
+        assert!(!script.contains("it's"), "{script}");
+        assert!(
+            script.contains("display notification (item 2 of argv) with title (item 1 of argv)")
+        );
+    }
+
+    #[test]
+    fn linux_keeps_a_title_from_being_read_as_an_option() {
+        let commands = Commands::default();
+        Linux { runner: &commands }.notify(&awkward()).unwrap();
+        assert_eq!(
+            only(&commands),
+            [
+                "notify-send",
+                "--app-name=otto",
+                "--",
+                &awkward().title,
+                &awkward().body
+            ]
+        );
+    }
+
+    /// What a base64 text holds, for a test to read back.
+    fn decoded(text: &str) -> Vec<u8> {
+        const ALPHABET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let sixes: Vec<u32> = text
+            .chars()
+            .filter(|c| *c != '=')
+            .map(|c| ALPHABET.find(c).unwrap() as u32)
+            .collect();
+        let mut bytes = Vec::new();
+        for group in sixes.chunks(4) {
+            let all = group
+                .iter()
+                .enumerate()
+                .fold(0_u32, |all, (index, six)| all | six << (18 - 6 * index));
+            for index in 0..group.len() - 1 {
+                bytes.push((all >> (16 - 8 * index)) as u8);
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn windows_quotes_the_words_inside_the_script() {
+        let commands = Commands::default();
+        Windows { runner: &commands }.notify(&awkward()).unwrap();
+        let command = only(&commands);
+        assert_eq!(
+            command[..4],
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand"
+            ]
+        );
+        let units: Vec<u16> = decoded(&command[4])
+            .chunks(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let script = String::from_utf16(&units).unwrap();
+        assert!(
+            script.contains("CreateTextNode('-job \"it''s\" failed')"),
+            "{script}"
+        );
+        assert!(
+            script.contains("CreateTextNode('exit 3, `x` \\ $HOME\nsecond')"),
+            "{script}"
+        );
+        assert!(script.ends_with(".Show($toast)"), "{script}");
+        assert!(!script.contains("{title}") && !script.contains("{body}"));
+    }
+
+    #[test]
+    fn base64_matches_the_known_vectors() {
+        let vectors = [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ];
+        for (plain, encoded) in vectors {
+            assert_eq!(base64(plain.as_bytes()), encoded);
+            assert_eq!(decoded(encoded), plain.as_bytes());
+        }
+    }
+
+    #[test]
+    fn a_command_that_fails_is_an_error_with_what_it_said() {
+        let commands = Commands {
+            failing: true,
+            ..Commands::default()
+        };
+        let error = Macos { runner: &commands }.notify(&awkward()).unwrap_err();
+        let said = format!("{error:#}");
+        assert!(said.contains("osascript"), "{said}");
+        assert!(said.contains("not allowed"), "{said}");
     }
 }
