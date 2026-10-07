@@ -89,7 +89,7 @@ fn watch(
             if effect == Effect::Quit {
                 return Ok(());
             }
-            if let Some(path) = perform(effect, &mut app, world) {
+            if let Some(path) = perform(effect, &mut app, world, now()) {
                 suspend(terminal).context(cannot_draw)?;
                 let edited = world.edit(&path);
                 resume(terminal).context("cannot take over the terminal")?;
@@ -137,7 +137,12 @@ fn paste_as_text(on: bool) {
 /// Carries out an effect and tells the app how it went. Opening the editor
 /// needs the terminal, which the loop owns: an effect that ends in the
 /// editor gives back the file to open.
-fn perform(effect: Effect, app: &mut App, world: &mut dyn World) -> Option<PathBuf> {
+fn perform(
+    effect: Effect,
+    app: &mut App,
+    world: &mut dyn World,
+    now: Timestamp,
+) -> Option<PathBuf> {
     let told = |error: anyhow::Error| format!("{error:#}");
     match effect {
         Effect::SetState { job, state } => app.done(world.set_state(&job, state).map_err(told)),
@@ -187,6 +192,7 @@ fn perform(effect: Effect, app: &mut App, world: &mut dyn World) -> Option<PathB
                 Err(error) => app.done(Err(told(error))),
             }
         }
+        Effect::Apply => app.show_applied(world.apply(now)),
     }
     None
 }
@@ -314,7 +320,7 @@ mod tests {
                 state,
             },
         ] {
-            assert_eq!(perform(effect, &mut app, &mut world), None);
+            assert_eq!(perform(effect, &mut app, &mut world, now()), None);
         }
         assert_eq!(app.notice, None);
         assert_eq!(
@@ -332,7 +338,7 @@ mod tests {
             job: "report".to_owned(),
             pid: 77,
         };
-        assert_eq!(perform(stop, &mut app, &mut world), None);
+        assert_eq!(perform(stop, &mut app, &mut world, now()), None);
         assert_eq!(
             app.notice.map(|notice| notice.text),
             Some("process 77 does not lead its process group".to_owned())
@@ -347,7 +353,7 @@ mod tests {
             path: "/prompts/report.md".into(),
         };
         assert_eq!(
-            perform(edit, &mut app, &mut world),
+            perform(edit, &mut app, &mut world, now()),
             Some(PathBuf::from("/prompts/report.md"))
         );
         assert!(world.calls.borrow().is_empty());
@@ -363,7 +369,7 @@ mod tests {
         let open = Effect::OpenForm {
             job: Some("report".to_owned()),
         };
-        assert_eq!(perform(open, &mut app, &mut world), None);
+        assert_eq!(perform(open, &mut app, &mut world, now()), None);
         assert_eq!(app.screen, app::Screen::Form);
         assert_eq!(app.form.as_ref().map(|form| form.read.as_str()), Some(FILE));
         assert_eq!(*world.calls.borrow(), ["text"]);
@@ -375,9 +381,9 @@ mod tests {
         world.text = FILE.to_owned();
         world.warnings = vec!["codex not found in PATH".to_owned()];
         let mut app = App::new(world.snapshot.clone());
-        perform(Effect::OpenForm { job: None }, &mut app, &mut world);
+        perform(Effect::OpenForm { job: None }, &mut app, &mut world, now());
         let spec = app.form.as_ref().unwrap().spec();
-        perform(Effect::Check { spec }, &mut app, &mut world);
+        perform(Effect::Check { spec }, &mut app, &mut world, now());
         assert_eq!(app.warnings, ["codex not found in PATH"]);
     }
 
@@ -394,7 +400,7 @@ mod tests {
     fn with_the_form(world: &mut Fake) -> App {
         world.text = FILE.to_owned();
         let mut app = App::new(world.snapshot.clone());
-        perform(Effect::OpenForm { job: None }, &mut app, world);
+        perform(Effect::OpenForm { job: None }, &mut app, world, now());
         world.calls.borrow_mut().clear();
         app
     }
@@ -404,7 +410,7 @@ mod tests {
         let mut world = world();
         let mut app = with_the_form(&mut world);
         // The prompt file was already there: nothing to open.
-        assert_eq!(perform(save(), &mut app, &mut world), None);
+        assert_eq!(perform(save(), &mut app, &mut world, now()), None);
         assert_eq!(
             *world.calls.borrow(),
             ["save new text", "ensure_prompt prompts/nightly.md"]
@@ -419,7 +425,7 @@ mod tests {
         let mut app = with_the_form(&mut world);
         world.fail_on = Some("ensure_prompt".to_owned());
         world.fail = Some("cannot create the prompt file".to_owned());
-        assert_eq!(perform(save(), &mut app, &mut world), None);
+        assert_eq!(perform(save(), &mut app, &mut world, now()), None);
         assert_eq!(app.screen, app::Screen::Jobs);
         assert_eq!(
             app.notice.map(|notice| notice.text),
@@ -432,7 +438,7 @@ mod tests {
         let mut world = world();
         let mut app = with_the_form(&mut world);
         world.fail = Some(jobs_file::CHANGED.to_owned());
-        perform(save(), &mut app, &mut world);
+        perform(save(), &mut app, &mut world, now());
         assert_eq!(app.screen, app::Screen::Jobs);
         assert!(app.form.is_none());
         assert!(app.notice.unwrap().text.starts_with("not saved:"));
@@ -447,7 +453,7 @@ mod tests {
         let open = Effect::OpenForm {
             job: Some("report".to_owned()),
         };
-        perform(open, &mut app, &mut world);
+        perform(open, &mut app, &mut world, now());
         assert_eq!(app.warnings, ["workdir not found"]);
     }
 
@@ -457,7 +463,7 @@ mod tests {
         world.created = Some("/etc/otto/prompts/nightly.md".into());
         let mut app = with_the_form(&mut world);
         assert_eq!(
-            perform(save(), &mut app, &mut world),
+            perform(save(), &mut app, &mut world, now()),
             Some(PathBuf::from("/etc/otto/prompts/nightly.md"))
         );
     }
@@ -467,7 +473,7 @@ mod tests {
         let mut world = world();
         let mut app = with_the_form(&mut world);
         world.fail = Some("the disk is full".to_owned());
-        assert_eq!(perform(save(), &mut app, &mut world), None);
+        assert_eq!(perform(save(), &mut app, &mut world, now()), None);
         assert_eq!(*world.calls.borrow(), ["save new text"]);
         assert_eq!(app.screen, app::Screen::Form);
         assert_eq!(
@@ -484,19 +490,43 @@ mod tests {
         let delete = Effect::Delete {
             job: "report".to_owned(),
         };
-        assert_eq!(perform(delete, &mut app, &mut world), None);
+        assert_eq!(perform(delete, &mut app, &mut world, now()), None);
         assert_eq!(*world.calls.borrow(), ["text", "save "]);
         let notice = app.notice.clone().unwrap();
         assert!(!notice.error);
-        assert_eq!(notice.text, "report deleted; otto sync removes its unit");
+        assert_eq!(notice.text, "report deleted");
 
         // A job the file does not have is told, and nothing is written.
         world.calls.borrow_mut().clear();
         let gone = Effect::Delete {
             job: "gone".to_owned(),
         };
-        perform(gone, &mut app, &mut world);
+        perform(gone, &mut app, &mut world, now());
         assert_eq!(*world.calls.borrow(), ["text"]);
         assert!(app.notice.unwrap().text.contains("no job named"));
+    }
+
+    #[test]
+    fn applying_the_sync_shows_what_the_world_did() {
+        use crate::sync;
+        use crate::tui::world::Pending;
+
+        let mut world = world();
+        let pending = vec![Pending {
+            job: "report".to_owned(),
+            change: Ok(sync::Action::Add),
+        }];
+        world.snapshot.pending = pending.clone();
+        world.snapshot.can_sync = true;
+        world.applied = pending.clone();
+        let mut app = App::new(world.snapshot.clone());
+        app.act(Action::Sync);
+        app.act(Action::Apply);
+        assert_eq!(app.act(Action::Yes), [Effect::Apply]);
+        assert_eq!(perform(Effect::Apply, &mut app, &mut world, now()), None);
+        assert_eq!(*world.calls.borrow(), ["apply"]);
+        assert_eq!(app.screen, app::Screen::Sync);
+        assert!(app.applied());
+        assert_eq!(app.changes(), pending);
     }
 }

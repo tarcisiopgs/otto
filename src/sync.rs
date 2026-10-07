@@ -192,62 +192,11 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
-    use anyhow::bail;
     use tempfile::TempDir;
 
     use super::*;
+    use crate::scheduler::fake::Fake;
     use crate::scheduler::runner::Recorder;
-
-    /// A scheduler that keeps its units in a temporary directory and records
-    /// what it was asked to load and unload.
-    struct Fake {
-        dir: PathBuf,
-        calls: RefCell<Vec<String>>,
-        broken: Option<String>,
-    }
-
-    impl Scheduler for Fake {
-        fn name(&self) -> &'static str {
-            "fake"
-        }
-
-        fn units(&self, job_name: &str, job: &Job, ctx: &Context) -> Result<Vec<Unit>> {
-            Ok(vec![Unit {
-                path: self.dir.join(format!("{job_name}.unit")),
-                contents: format!("{} {}", job.schedule.at, ctx.path),
-            }])
-        }
-
-        fn installed(&self) -> Result<Vec<String>> {
-            let mut names = Vec::new();
-            for entry in fs::read_dir(&self.dir)? {
-                let name = entry?.file_name().to_string_lossy().into_owned();
-                if let Some(job) = name.strip_suffix(".unit") {
-                    names.push(job.to_owned());
-                }
-            }
-            names.sort();
-            Ok(names)
-        }
-
-        fn load(&self, job_name: &str, units: &[Unit], _runner: &dyn Runner) -> Result<()> {
-            // Like the real backends: the file is written, then the scheduler is asked.
-            for unit in units {
-                fs::write(&unit.path, &unit.contents)?;
-            }
-            if self.broken.as_deref() == Some(job_name) {
-                bail!("the scheduler refused {job_name}");
-            }
-            self.calls.borrow_mut().push(format!("load {job_name}"));
-            Ok(())
-        }
-
-        fn unload(&self, job_name: &str, _runner: &dyn Runner) -> Result<()> {
-            let _ = fs::remove_file(self.dir.join(format!("{job_name}.unit")));
-            self.calls.borrow_mut().push(format!("unload {job_name}"));
-            Ok(())
-        }
-    }
 
     /// A machine with one prompt, one working directory and `claude` on the PATH.
     struct World {
@@ -274,11 +223,7 @@ mod tests {
                 path: at("bin").to_string_lossy().into_owned(),
                 log_dir: at("logs"),
             };
-            let fake = Fake {
-                dir: at("units"),
-                calls: RefCell::new(Vec::new()),
-                broken: None,
-            };
+            let fake = Fake::new(at("units"));
             World {
                 root,
                 ctx,

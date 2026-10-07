@@ -6,7 +6,7 @@ otto runs Claude Code or Codex on a schedule, without a session, a desktop app o
 
 The name comes from Otto, the school bus driver: he shows up on schedule. It also sounds like "auto".
 
-> **Status: early.** Jobs are scheduled for real with `otto sync`, and every run is recorded. Notifications and the terminal UI are not built yet. See [Roadmap](#roadmap).
+> **Status: early.** Jobs are scheduled for real with `otto sync`, and every run is recorded. Notifications are not built yet. See [Roadmap](#roadmap).
 
 ## Install
 
@@ -101,6 +101,7 @@ otto log linear-updates <run-id>   # the output of one run
 | `?` | every key |
 | `n` | create a job |
 | `E` `d` | edit the selected job, delete it; `y` confirms the delete |
+| `S` | what a sync would do; there, `a` applies it and `y` confirms |
 | `q` | quit |
 
 A run started from the screen does not belong to it: it keeps going after you quit, and shows as running when you open otto again. The screen follows the output of a run in progress and loads the last 1 MiB of a long one; `otto log` prints all of it. Colours and other terminal escapes in the output are left out, and a progress line that rewrites itself shows where it ended.
@@ -121,7 +122,13 @@ No day marked means every day. Arguments the form cannot hold on a line each (on
 
 `d` removes the job from `jobs.toml` after asking. Its prompt file and its history stay on disk. A job with a run in progress is not deleted: stop the run first.
 
-**A job created, edited or deleted here is not scheduled until `otto sync`**, the same as after editing the file by hand.
+### Applying the sync
+
+**A job created, edited or deleted here is not scheduled until the sync is applied**, the same as after editing the file by hand. The list says so: a job the scheduler does not have as the file has it reads `not applied` where its next run would be, and the line above the keys counts what is waiting. A job the sync cannot handle, such as one whose prompt file is gone, reads `sync error` there and is counted apart.
+
+`S` shows what a sync would do, one job to a line: `add`, `update`, `remove`, or `error` with the reason under it. A job with a run in progress reads `busy` and is left for a later sync. Nothing is touched until `a`, which asks first, and `y`. The screen then says what was done in the words of `otto sync`: `added`, `updated`, `removed`.
+
+It is the same sync as the command, with the jobs file and the `PATH` otto was opened with. What is applied is what was listed: if the jobs file changed or went away after the screen last read it, nothing is applied and the screen asks for another look. A jobs file that is missing removes nothing.
 
 The screen needs a terminal of at least 60 columns by 12 rows. Where there is no terminal (a pipe, a script), `otto` alone prints the help and exits with 2. It uses your terminal's own colours and background.
 
@@ -187,7 +194,6 @@ Requires Rust 1.88 or newer.
 
 - Notifications when a run starts, finishes, fails or is skipped.
 - Prechecks (a command that decides whether today's run happens) and a missed-run grace window.
-- Reviewing and applying the sync from the terminal UI.
 - Windows out of experimental, with Scoop and winget packages.
 
 ## License
