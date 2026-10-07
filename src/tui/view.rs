@@ -753,7 +753,7 @@ fn fields(form: &Form, width: usize) -> (Vec<Line<'_>>, (usize, usize)) {
             Focus::At => Some(&form.at),
             Focus::Args => Some(&form.args),
             Focus::Prompt => Some(&form.prompt),
-            Focus::Agent | Focus::Days => None,
+            Focus::Agent | Focus::Days | Focus::Notify => None,
         };
         match (focus, text) {
             // Arguments the field cannot hold are not shown as if it could.
@@ -781,6 +781,7 @@ fn fields(form: &Form, width: usize) -> (Vec<Line<'_>>, (usize, usize)) {
                     spans.extend(choice(agent.program(), agent == form.agent));
                 }
             }
+            (Focus::Notify, _) => {}
             (_, None) => {
                 for (index, day) in DAYS.into_iter().enumerate() {
                     if index > 0 {
@@ -820,6 +821,7 @@ fn hint(form: &Form) -> Option<&'static str> {
             Some("these arguments can only be changed in the jobs file")
         }
         Focus::Args => Some("a scheduled run has nobody to answer a permission prompt"),
+        Focus::Notify => None,
     }
 }
 
