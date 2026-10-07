@@ -113,7 +113,7 @@ The next run is otto's own reading of the schedule, not something it asks the OS
 
 ### Creating and editing a job
 
-`n` opens a form for a new job and `E` opens it on the selected one: name, agent, time, days, working directory, prompt file and arguments (one to a line). `tab` moves between the fields, `space` marks an agent or a day, `ctrl-s` saves and `esc` leaves; every letter is text there, so the single-letter keys of the other screens do not apply. The line above the keys says what the field you are on takes.
+`n` opens a form for a new job and `E` opens it on the selected one: name, agent, time, days, working directory, prompt file, arguments (one to a line) and which runs the job [tells you about](#notifications). `tab` moves between the fields, `space` marks an agent, a day or a level of notification, `ctrl-s` saves and `esc` leaves; every letter is text there, so the single-letter keys of the other screens do not apply. The line above the keys says what the field you are on takes.
 
 Saving writes `jobs.toml`, and only what changed in it: your comments, the order of the jobs and the layout of the file stay as they were. A job that cannot be saved says why in the words the jobs file is read with, and the reason stays until you change the job. An empty working directory or prompt path is refused. A working directory that is not there, or an agent that is not on the `PATH`, is a note and does not stop the save, since `otto sync` checks both. If the file changed on disk while the form was open, the save is refused and the list is read again.
 
@@ -180,7 +180,7 @@ otto uses what the system already has: `osascript` on macOS, `notify-send` on Li
 
 Two things a notification does not know. A run that was interrupted, because the machine went down or the process was killed, tells nothing: no otto was left to tell. And an agent that exits with 0 without having done its job is an `ok` run, as it is everywhere else in otto.
 
-`notify` is read when the job runs. Changing it needs no `otto sync`.
+`notify` is read when the job runs. Changing it needs no `otto sync`, and the terminal UI has it as the last field of a job.
 
 ## Windows (experimental)
 
