@@ -107,10 +107,12 @@ impl Scheduler for Launchd {
                 )
             })
             .collect();
-        // The version is written so that an upgraded otto has a job to reload.
-        // At login launchd pins an agent to the binary it finds, and kills the
-        // run when an upgrade has put another one at the same path; loading
-        // the agent again drops the pin.
+        // At login launchd pins an agent to the program it finds, and kills the
+        // run when an upgrade has put another binary at the same path. `env`
+        // is the program so that the pin is on a binary no upgrade of otto
+        // replaces; it becomes otto, with the same process id.
+        // The version is written so that an upgraded otto has a job to reload:
+        // a unit written by an older otto may start otto some other way.
         let contents = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -121,6 +123,7 @@ impl Scheduler for Launchd {
 	<string>{label}</string>
 	<key>ProgramArguments</key>
 	<array>
+		<string>/usr/bin/env</string>
 		<string>{otto}</string>
 		<string>--config</string>
 		<string>{config}</string>
@@ -288,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn one_interval_per_day_and_otto_as_the_program() {
+    fn one_interval_per_day_and_otto_started_through_env() {
         let config = Config::parse(
             "[jobs.report]\nagent = \"claude\"\nprompt = \"/p.md\"\nworkdir = \"/w\"\nschedule = { at = \"16:05\", days = [\"mon\", \"sun\"] }\n",
             Path::new("/"),
@@ -324,7 +327,13 @@ mod tests {
         assert!(plist.contains("<string>report</string>"));
 
         let args = plist.split("<key>ProgramArguments</key>").nth(1).unwrap();
+        // The program launchd starts is one an upgrade of otto never replaces.
+        assert!(
+            args.trim_start()
+                .starts_with("<array>\n\t\t<string>/usr/bin/env</string>")
+        );
         let order = [
+            "/usr/bin/env",
             "/opt/R&amp;D/otto",
             "--config",
             "/Users/me/.config/otto/jobs.toml",
@@ -380,8 +389,8 @@ mod tests {
         assert!(written[0].contents.contains("<!-- otto 0.5.0 -->"));
         assert_eq!(written, plist("0.5.0"));
 
-        // The path of the binary is the same after an upgrade, so the version
-        // is what makes the sync see a job to reload.
+        // Nothing else in the unit changes with an upgrade, so the version is
+        // what makes the sync see a job to reload.
         let upgraded = plist("0.6.0");
         assert_eq!(
             crate::sync::decide(&upgraded, &[Some(written[0].contents.clone())]),
