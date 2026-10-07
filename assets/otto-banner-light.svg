@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="800" viewBox="0 0 1920 800">
+<path d="M140,172 L202,218 L140,264 Z" fill="#bf8700"/>
+<text x="284" y="300" font-family="Menlo, 'SF Mono', ui-monospace, Consolas, monospace" font-weight="700" font-size="220" letter-spacing="-6" fill="#1f2328">otto</text>
+<path d="M220,356 L220,710 M220,676 L1790,676" fill="none" stroke="#8c959f" stroke-width="5"/>
+<circle cx="1548" cy="283" r="15" fill="#bf8700"/>
+<text x="1790" y="300" text-anchor="end" font-family="Menlo, 'SF Mono', ui-monospace, Consolas, monospace" font-size="50" fill="#1f2328">running</text>
+<text x="1790" y="589" text-anchor="end" font-family="Menlo, 'SF Mono', ui-monospace, Consolas, monospace" font-size="50" fill="#8c959f">since 16:05</text>
+<text x="310" y="432" font-family="Menlo, 'SF Mono', ui-monospace, Consolas, monospace" font-size="50" fill="#1f2328">scheduled runs for coding agents</text>
+<text x="310" y="500" font-family="Menlo, 'SF Mono', ui-monospace, Consolas, monospace" font-size="50" fill="#8c959f">on the scheduler your os already has</text>
+<polyline points="314,574 332.2,592.8 366,549.9" fill="none" stroke="#1f2328" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="434,574 452.2,592.8 486,549.9" fill="none" stroke="#1f2328" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="554,574 572.2,592.8 606,549.9" fill="none" stroke="#1f2328" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M679.2,551.2 L720.8,592.8 M720.8,551.2 L679.2,592.8" fill="none" stroke="#cf222e" stroke-width="9" stroke-linecap="round"/>
+<polyline points="794,574 812.2,592.8 846,549.9" fill="none" stroke="#1f2328" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="914,574 932.2,592.8 966,549.9" fill="none" stroke="#1f2328" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="1034,574 1052.2,592.8 1086,549.9" fill="none" stroke="#1f2328" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="1180" cy="572" r="20.3" fill="#bf8700"/>
+</svg>
