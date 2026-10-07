@@ -266,7 +266,10 @@ impl App {
         if self.screen == Screen::Sync && self.applied.is_none() && self.snapshot.pending.is_empty()
         {
             self.leave_sync();
-            self.say("nothing left to apply".to_owned());
+            // A jobs file that broke says so itself, above the list.
+            if self.snapshot.error.is_none() {
+                self.say("nothing left to apply".to_owned());
+            }
         }
         let jobs = &self.snapshot.jobs;
         if self.selected().is_none() {
@@ -469,8 +472,15 @@ impl App {
         self.sync_top.min(self.last_sync_top())
     }
 
+    /// A list that does not fit ends a row further down than its last job:
+    /// in the rule that closes it.
     fn last_sync_top(&self) -> usize {
-        self.sync_rows().saturating_sub(self.page)
+        let rows = self.sync_rows();
+        if rows > self.page {
+            rows + 1 - self.page
+        } else {
+            0
+        }
     }
 
     fn preview(&mut self) {
@@ -494,7 +504,7 @@ impl App {
             return;
         }
         match self.applicable() {
-            0 => self.say("nothing can be applied yet".to_owned()),
+            0 => self.say("nothing can be applied now".to_owned()),
             changes => self.confirm = Some(Confirm::Apply { changes }),
         }
     }
@@ -1263,13 +1273,13 @@ mod tests {
         assert_eq!(app.screen, Screen::Jobs);
         assert!(app.form.is_none());
         assert_eq!(app.job.as_deref(), Some("nightly"));
-        // The list would show it with a next run: it is not scheduled yet.
+        // What is still to do is on its entry and in the reminder of the sync.
         assert_eq!(text(&app), "nightly saved");
         assert!(!app.notice.unwrap().error);
     }
 
     #[test]
-    fn a_deleted_job_still_has_its_unit_until_the_sync() {
+    fn a_deleted_job_is_said_to_be_deleted() {
         let mut app = App::new(three());
         app.deleted("alpha");
         assert_eq!(text(&app), "alpha deleted");
@@ -1861,7 +1871,7 @@ mod tests {
         ]);
         assert_eq!(app.act(Action::Apply), []);
         assert_eq!(app.confirm, None);
-        assert_eq!(text(&app), "nothing can be applied yet");
+        assert_eq!(text(&app), "nothing can be applied now");
     }
 
     #[test]
@@ -1930,6 +1940,17 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_closed_by_an_error_leaves_the_word_to_the_error() {
+        let mut app = previewing(mixed());
+        app.refresh(Snapshot {
+            error: Some("invalid config jobs.toml".to_owned()),
+            ..unsynced(Vec::new())
+        });
+        assert_eq!(app.screen, Screen::Jobs);
+        assert!(app.notice.is_none());
+    }
+
+    #[test]
     fn the_question_goes_when_nothing_could_be_applied_any_more() {
         let mut app = previewing(mixed());
         app.act(Action::Apply);
@@ -1965,10 +1986,11 @@ mod tests {
         assert_eq!(app.sync_top(), 0);
         app.act(Action::Down);
         assert_eq!(app.sync_top(), 1);
+        // One row further than the last job: the rule that closes the list.
         app.act(Action::Bottom);
-        assert_eq!(app.sync_top(), 6);
+        assert_eq!(app.sync_top(), 7);
         app.act(Action::Down);
-        assert_eq!(app.sync_top(), 6);
+        assert_eq!(app.sync_top(), 7);
         app.act(Action::Top);
         assert_eq!(app.sync_top(), 0);
     }

@@ -166,7 +166,9 @@ impl Real {
         };
         // A jobs file that cannot be read is not synced from the last one
         // that could: the units would follow a file that is not there.
-        if self.broken.is_some() {
+        // Nor is one that is not there synced as a file with no jobs, which
+        // would remove every unit.
+        if self.broken.is_some() || self.text.is_none() {
             return Vec::new();
         }
         let config = Config {
@@ -282,8 +284,17 @@ impl World for Real {
     }
 
     fn apply(&mut self, now: Timestamp) -> Vec<Pending> {
-        // From the jobs file as it is now, not as the last look found it.
+        self.children.reap();
+        // What is applied is what was looked at: a jobs file that changed
+        // since is one nobody reviewed.
+        let seen = self.text.clone();
         self.reload();
+        if self.text != seen {
+            return vec![Pending {
+                job: "*".to_owned(),
+                change: Err("the jobs file changed: review the sync again".to_owned()),
+            }];
+        }
         self.sync(now, false)
     }
 
@@ -1163,12 +1174,15 @@ mod unix_tests {
             ..setup(&dir, Box::new(Recorder::new()))
         });
         let store = Store::new(at("state"));
-        Synced {
+        let mut machine = Synced {
             dir,
             real,
             asked,
             store,
-        }
+        };
+        // The screen looks before it applies: so does every machine here.
+        machine.real.snapshot(now());
+        machine
     }
 
     fn synced() -> Synced {
@@ -1322,6 +1336,55 @@ mod unix_tests {
         // And a file that cannot be read is not applied from memory.
         assert!(machine.real.apply(now()).is_empty());
         assert!(machine.asked.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_jobs_file_that_is_gone_removes_no_unit() {
+        let mut machine = synced();
+        machine.real.apply(now());
+        fs::remove_file(machine.dir.path().join("jobs.toml")).unwrap();
+        let snapshot = machine.real.snapshot(now());
+        assert!(snapshot.jobs.is_empty());
+        assert!(snapshot.pending.is_empty());
+        assert!(machine.real.apply(now()).is_empty());
+        assert_eq!(*machine.asked.borrow(), ["load report", "load triage"]);
+    }
+
+    #[test]
+    fn a_jobs_file_left_empty_still_removes_its_units() {
+        let mut machine = synced();
+        machine.real.apply(now());
+        fs::write(machine.dir.path().join("jobs.toml"), "").unwrap();
+        assert_eq!(
+            pending(&machine.real.snapshot(now()).pending),
+            ["report removed", "triage removed"]
+        );
+    }
+
+    #[test]
+    fn a_jobs_file_that_changed_since_the_look_is_not_applied() {
+        let mut machine = synced();
+        let later = JOBS.replace("16:05", "17:30");
+        fs::write(machine.dir.path().join("jobs.toml"), later).unwrap();
+        let refused = pending(&machine.real.apply(now()));
+        assert_eq!(refused, ["*: the jobs file changed: review the sync again"]);
+        assert!(machine.asked.borrow().is_empty());
+        // Looked at again, it is applied.
+        machine.real.snapshot(now());
+        assert_eq!(
+            pending(&machine.real.apply(now())),
+            ["report added", "triage added"]
+        );
+    }
+
+    #[test]
+    fn a_jobs_file_that_went_away_since_the_look_is_not_applied() {
+        let mut machine = synced();
+        machine.real.apply(now());
+        fs::remove_file(machine.dir.path().join("jobs.toml")).unwrap();
+        let refused = pending(&machine.real.apply(now()));
+        assert_eq!(refused, ["*: the jobs file changed: review the sync again"]);
+        assert_eq!(*machine.asked.borrow(), ["load report", "load triage"]);
     }
 
     #[test]

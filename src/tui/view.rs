@@ -15,7 +15,7 @@ use crate::sync;
 use crate::tui::app::{App, Confirm, ENTRY, Screen};
 use crate::tui::form::{Field, Focus, Form};
 use crate::tui::text::{cut, fit, tail, width as width_in_columns, wrapped};
-use crate::tui::world::JobView;
+use crate::tui::world::{JobView, Pending};
 
 /// The smallest terminal the UI is drawn on: columns, then rows.
 pub const MIN: (u16, u16) = (60, 12);
@@ -119,7 +119,16 @@ fn spaces(count: usize) -> Span<'static> {
 }
 
 /// `left` at the left edge and `right` at the right one, a column in from it.
-fn between<'a>(left: Vec<Span<'a>>, right: Vec<Span<'a>>, width: usize) -> Line<'a> {
+/// What is at the right is what the line is read for: the end of `left` gives
+/// way to it.
+fn between<'a>(mut left: Vec<Span<'a>>, right: Vec<Span<'a>>, width: usize) -> Line<'a> {
+    let room = width.saturating_sub(width_of(&right) + 3);
+    if width_of(&left) > room
+        && let Some(last) = left.pop()
+    {
+        let kept = room.saturating_sub(width_of(&left));
+        left.push(Span::styled(cut(&last.content, kept), last.style));
+    }
     let gap = width
         .saturating_sub(width_of(&left) + width_of(&right) + 1)
         .max(1);
@@ -306,24 +315,29 @@ fn strip(job: &JobView, count: usize) -> Vec<Span<'static>> {
 }
 
 /// The second line of an entry: the coming run, the strip of marks and how
-/// the last run ended.
+/// the last run ended. A job the scheduler does not have as the file has it
+/// says so where the coming run would be: that run is the file's word, not
+/// yet the scheduler's.
 ///
 /// With room, the strip ends in a fixed column, so the newest run of every
 /// job is read down one column. Without it the strips still stack, after a
 /// coming run given the room of an ordinary one, and the ending gives up its
 /// duration, then the word `last`. Only then does the line let go of the
 /// shared column, and last of all of its oldest marks.
-fn second_line(job: &JobView, unapplied: bool, now: &Zoned, width: usize) -> Line<'static> {
-    let mut lead = vec![
+fn second_line(
+    job: &JobView,
+    pending: Option<&Pending>,
+    now: &Zoned,
+    width: usize,
+) -> Line<'static> {
+    let lead = vec![
         Span::styled(" │ ", dim()),
-        Span::raw(coming(job.next.as_ref(), now)),
+        match pending.map(|pending| &pending.change) {
+            Some(Ok(_)) => Span::styled("not applied", strong()),
+            Some(Err(_)) => Span::styled("sync error", bad()),
+            None => Span::raw(coming(job.next.as_ref(), now)),
+        },
     ];
-    // The scheduler does not have the job as the file has it: the coming run
-    // is the file's word, not yet the scheduler's.
-    if unapplied {
-        lead.push(Span::styled(" · ", dim()));
-        lead.push(Span::styled("not applied", strong()));
-    }
     let edge = width.saturating_sub(1);
     let endings = last(job, now);
     let marks = strip(job, STRIP);
@@ -490,8 +504,8 @@ fn jobs<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a
     let first = first_visible(selected.unwrap_or(0), visible);
     for (index, job) in all.iter().enumerate().skip(first).take(visible.max(1)) {
         lines.push(first_line(job, selected == Some(index), true, width));
-        let unapplied = app.snapshot.pending_for(&job.name).is_some();
-        lines.push(second_line(job, unapplied, now, width));
+        let pending = app.snapshot.pending_for(&job.name);
+        lines.push(second_line(job, pending, now, width));
         lines.push(rule(width));
     }
     lines
@@ -517,8 +531,8 @@ fn job<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a>
     let mut lines = problem(app, width);
     // The same entry the list shows, opened: its facts and its runs follow.
     lines.push(first_line(job, true, false, width));
-    let unapplied = app.snapshot.pending_for(&job.name).is_some();
-    lines.push(second_line(job, unapplied, now, width));
+    let pending = app.snapshot.pending_for(&job.name);
+    lines.push(second_line(job, pending, now, width));
     // On a short terminal the facts give way to the runs.
     if sheet(rows.saturating_sub(lines.len() - 2)) == SHEET {
         lines.push(fact(
@@ -619,32 +633,50 @@ fn changes(app: &App, width: usize, rows: usize) -> Vec<Line<'_>> {
     lines.into_iter().skip(app.sync_top()).take(rows).collect()
 }
 
-/// What the sync screen says under its list: where it is in a list that does
-/// not fit, and what its words leave unsaid.
-fn about_the_sync(app: &App) -> String {
+/// What the sync screen says under its list: what was done, once it was,
+/// where the screen is in a list that does not fit, and what `busy` leaves
+/// unsaid. What does not fit in `room` is left out whole, last first.
+fn about_the_sync(app: &App, room: usize) -> Line<'static> {
     use sync::Action::{Add, Busy, Remove, Update};
     let all = app.changes();
+    let mut parts = Vec::new();
     if app.applied() {
         let done = all
             .iter()
             .filter(|change| matches!(change.change, Ok(Add | Update | Remove)))
             .count();
-        return match (done, all.len() - done) {
-            (0, _) => "nothing applied".to_owned(),
-            (done, 0) => format!("{done} applied"),
-            (done, not) => format!("{done} applied, {not} not"),
-        };
+        // What happened, so in the default foreground.
+        parts.push(Span::raw(match all.len() - done {
+            0 => format!("{done} applied"),
+            not => format!("{done} applied, {not} not"),
+        }));
     }
-    let mut parts = Vec::new();
     let total = app.sync_rows();
     if total > app.page {
         let first = app.sync_top();
-        parts.push(format!("{}–{} of {total}", first + 1, first + app.page));
+        let last = (first + app.page).min(total);
+        parts.push(Span::styled(
+            format!("{}–{last} of {total}", first + 1),
+            dim(),
+        ));
     }
     if all.iter().any(|change| change.change == Ok(Busy)) {
-        parts.push("busy: applied by a sync after its run ends".to_owned());
+        parts.push(Span::styled("busy: sync again after its run ends", dim()));
     }
-    parts.join(" · ")
+    let mut spans = vec![Span::raw(" ")];
+    let mut used = 0;
+    for part in parts {
+        let gap = if used == 0 { 0 } else { 3 };
+        if used + gap + part.width() > room {
+            break;
+        }
+        if gap > 0 {
+            spans.push(Span::styled(" · ", dim()));
+        }
+        used += gap + part.width();
+        spans.push(part);
+    }
+    Line::from(spans)
 }
 
 /// Where the value of a field starts: after the marker, the margin rule and
@@ -801,7 +833,7 @@ const ACTIONS: [(&str, &str); 8] = [
     ("p s u", "pause, skip next, resume"),
     ("e", "edit the prompt"),
     ("n E d", "new, edit, delete a job"),
-    ("S", "review and apply the sync"),
+    ("S", "what a sync would do"),
 ];
 
 const MOVES: [(&str, &str); 5] = [
@@ -881,15 +913,35 @@ fn notice(app: &App, width: usize) -> Line<'_> {
         return Line::raw(format!(" {}", cut(&text, room)));
     }
     if app.screen == Screen::Sync {
-        return Line::styled(format!(" {}", cut(&about_the_sync(app), room)), dim());
+        return about_the_sync(app, room);
     }
     // The list says that the scheduler is behind the jobs file, and the way
-    // to the screen that shows by how much.
-    let behind = app.snapshot.pending.len();
-    if app.screen == Screen::Jobs && behind > 0 {
-        let changes = if behind == 1 { "change" } else { "changes" };
-        let text = format!("{behind} {changes} not applied: S to review");
-        return Line::raw(format!(" {}", cut(&text, room)));
+    // to the screen that shows by how much. What the sync cannot do is not a
+    // change waiting to be applied, and is counted apart.
+    let pending = &app.snapshot.pending;
+    if app.screen == Screen::Jobs && !pending.is_empty() {
+        let errors = pending
+            .iter()
+            .filter(|pending| pending.change.is_err())
+            .count();
+        let count = |many: usize, what: &str| {
+            let plural = if many == 1 { "" } else { "s" };
+            format!("{many} {what}{plural}")
+        };
+        let said = match (pending.len() - errors, errors) {
+            (changes, 0) => format!("{} not applied", count(changes, "change")),
+            (0, errors) => format!("{} in the sync", count(errors, "error")),
+            (changes, errors) => format!(
+                "{} not applied, {}",
+                count(changes, "change"),
+                count(errors, "error")
+            ),
+        };
+        return Line::from(vec![
+            Span::raw(format!(" {said}: ")),
+            Span::styled("S", strong()),
+            Span::raw(" to review"),
+        ]);
     }
     // And the log screen says where it is in the output.
     let (Screen::Log, Some(log)) = (&app.screen, &app.log) else {
@@ -1470,7 +1522,7 @@ mod tests {
             "pause, skip next, resume",
             "edit the prompt",
             "new, edit, delete a job",
-            "review and apply the sync",
+            "what a sync would do",
             "quit",
         ] {
             assert!(text.contains(expected), "{expected:?} is missing:\n{text}");
@@ -2081,7 +2133,10 @@ mod tests {
         let app = unsynced(vec![pend("report", Ok(sync::Action::Update))]);
         let text = screen(&app, 78, 20);
         let rows: Vec<&str> = text.lines().collect();
-        assert!(rows[3].contains("next today 16:05 · not applied"), "{text}");
+        // Where its coming run would be: the scheduler has no such run yet.
+        assert!(rows[3].starts_with(" │ not applied"), "{text}");
+        assert!(!rows[3].contains("next today"), "{text}");
+        assert!(rows[6].starts_with(" │ next today 16:05"), "{text}");
         assert!(!rows[6].contains("not applied"), "{text}");
         assert!(
             rows[18].starts_with(" 1 change not applied: S to review"),
@@ -2101,6 +2156,112 @@ mod tests {
             text.contains(" 2 changes not applied: S to review"),
             "{text}"
         );
+        for row in text.lines() {
+            assert!(width_in_columns(row.trim_end()) < 60, "{row}");
+        }
+    }
+
+    #[test]
+    fn what_the_sync_cannot_do_is_an_error_not_a_change() {
+        let app = unsynced(vec![
+            pend("report", Ok(sync::Action::Add)),
+            pend("triage", Err("prompt file not found: /prompts/triage.md")),
+            pend("nightly", Ok(sync::Action::Busy)),
+        ]);
+        let text = screen(&app, 78, 20);
+        let rows: Vec<&str> = text.lines().collect();
+        assert!(rows[3].starts_with(" │ not applied"), "{text}");
+        assert!(rows[6].starts_with(" │ sync error"), "{text}");
+        assert!(
+            rows[18].starts_with(" 2 changes not applied, 1 error: S to review"),
+            "{text}"
+        );
+        let app = unsynced(vec![
+            pend("report", Err("workdir not found")),
+            pend("triage", Err("workdir not found")),
+        ]);
+        let text = screen(&app, 60, 12);
+        assert!(
+            text.contains(" 2 errors in the sync: S to review"),
+            "{text}"
+        );
+        assert!(!text.contains("not applied"), "{text}");
+        let app = unsynced(vec![pend("*", Err("cannot read the units"))]);
+        let text = screen(&app, 60, 12);
+        assert!(text.contains(" 1 error in the sync: S to review"), "{text}");
+    }
+
+    #[test]
+    fn a_job_not_applied_keeps_its_strip_in_the_column() {
+        let eight = |name: &str| JobView {
+            runs: (0..8)
+                .map(|n| run(&format!("r{n}"), Outcome::Ok, Trigger::Manual))
+                .collect(),
+            ..job(name)
+        };
+        for (width, height) in [(78, 20), (60, 12)] {
+            let app = App::new(Snapshot {
+                jobs: vec![eight("report"), eight("triage")],
+                pending: vec![pend("triage", Ok(sync::Action::Update))],
+                can_sync: true,
+                ..Snapshot::default()
+            });
+            let text = screen(&app, width, height);
+            let newest: Vec<usize> = text
+                .lines()
+                .filter(|line| line.starts_with(" │ "))
+                .map(|line| {
+                    assert_eq!(line.matches('✓').count(), 8, "{text}");
+                    line.chars()
+                        .collect::<Vec<_>>()
+                        .iter()
+                        .rposition(|c| *c == '✓')
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(newest.len(), 2, "{text}");
+            assert_eq!(newest[0], newest[1], "{text}");
+        }
+    }
+
+    #[test]
+    fn a_long_schedule_gives_way_to_the_word_at_the_edge() {
+        let six = JobView {
+            job: Job {
+                schedule: Schedule {
+                    at: "16:05".to_owned(),
+                    days: vec![
+                        Weekday::Mon,
+                        Weekday::Tue,
+                        Weekday::Wed,
+                        Weekday::Thu,
+                        Weekday::Fri,
+                        Weekday::Sat,
+                    ],
+                },
+                ..job("six-days").job
+            },
+            state: State {
+                paused: false,
+                skip_next: true,
+            },
+            ..job("six-days")
+        };
+        let mut app = App::new(Snapshot {
+            jobs: vec![six],
+            pending: vec![pend("six-days", Ok(sync::Action::Update))],
+            can_sync: true,
+            ..Snapshot::default()
+        });
+        let text = screen(&app, 60, 12);
+        let entry = text.lines().nth(2).unwrap();
+        assert!(entry.trim_end().ends_with("…  skip next"), "{text}");
+        app.act(Action::Sync);
+        app.columns = columns(60);
+        app.page = page(12);
+        let text = screen(&app, 60, 12);
+        let change = text.lines().nth(2).unwrap();
+        assert!(change.trim_end().ends_with("…  update"), "{text}");
         for row in text.lines() {
             assert!(width_in_columns(row.trim_end()) < 60, "{row}");
         }
@@ -2147,7 +2308,7 @@ mod tests {
         assert!(rows[6].trim_end().ends_with(" remove"), "{text}");
         assert!(rows[7].starts_with(" ├──"), "{text}");
         assert!(
-            rows[18].contains("busy: applied by a sync after its run ends"),
+            rows[18].contains("busy: sync again after its run ends"),
             "{text}"
         );
         assert_eq!(rows[19].trim_end(), " a apply  esc back  ? help");
@@ -2192,6 +2353,14 @@ mod tests {
         let text = screen(&app, 60, 12);
         assert!(!text.contains("job-00"), "{text}");
         assert!(text.contains("job-11"), "{text}");
+        // The end of the list is the rule that closes it.
+        assert!(text.contains(" ├──"), "{text}");
+        assert!(text.contains(" 6–12 of 12"), "{text}");
+        // What was applied is as long, and says where it is too.
+        let done = app.changes().to_vec();
+        app.show_applied(done);
+        let text = screen(&app, 60, 12);
+        assert!(text.contains(" 12 applied · 1–8 of 12"), "{text}");
     }
 
     #[test]
@@ -2233,11 +2402,31 @@ mod tests {
     }
 
     #[test]
+    fn what_a_busy_job_waits_for_is_said_after_applying_too() {
+        let mut app = unsynced(every_change());
+        app.act(Action::Sync);
+        app.columns = columns(60);
+        app.page = page(12);
+        app.show_applied(vec![
+            pend("report", Ok(sync::Action::Add)),
+            pend("nightly", Ok(sync::Action::Busy)),
+        ]);
+        let text = screen(&app, 60, 12);
+        assert!(
+            text.contains(" 1 applied, 1 not · busy: sync again after its run ends"),
+            "{text}"
+        );
+        app.show_applied(vec![pend("nightly", Ok(sync::Action::Busy))]);
+        let text = screen(&app, 60, 12);
+        assert!(text.contains(" 0 applied, 1 not · busy:"), "{text}");
+    }
+
+    #[test]
     fn the_help_still_fits_with_the_sync_in_it() {
         let mut app = unsynced(Vec::new());
         app.act(Action::Help);
         let text = screen(&app, 60, 12);
-        assert!(text.contains(" S     review and apply the sync"), "{text}");
+        assert!(text.contains(" S     what a sync would do"), "{text}");
         for row in text.lines() {
             assert!(width_in_columns(row.trim_end()) < 60, "{row}");
         }

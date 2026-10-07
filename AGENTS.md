@@ -82,7 +82,7 @@ Do not create a release or publish to npm unless the user asks for it in that co
 - The units directory is the only record of what is scheduled. otto keeps no list of its own; a unit with otto's prefix is an otto job.
 - The job form has no validation of its own. Why a job cannot be saved is the error `jobs_file` gives for the text the form would write, which is the error reading the file would give.
 - The form never fills in or suggests an agent argument. What an agent may do is written by the user.
-- The terminal UI looks at the scheduler every second and touches it in one place: `World::apply`, reached only by answering `y` to the question of the sync screen. A snapshot is a dry run of `sync::sync`, which writes nothing and runs nothing.
+- The terminal UI looks at the scheduler every second and touches it in one place: `World::apply`, reached only by answering `y` to the question of the sync screen. A snapshot is a dry run of `sync::sync`, which writes nothing and runs nothing. A jobs file that is missing is never synced, and one that changed since the last snapshot is not applied.
 - Only `src/jobs_file.rs` writes `jobs.toml`. It is the user's file: a change touches the keys that changed and keeps every comment, the order and the line endings. What it would write is checked with `Config::parse` first, and it refuses to write over a file that changed on disk since it was read.
 - Only `src/store.rs` knows the layout of the state directory. It takes its root as a parameter, so tests use a temporary directory.
 - Code that needs the time takes it as a parameter (`jiff::Timestamp`); only `main.rs` reads the clock.

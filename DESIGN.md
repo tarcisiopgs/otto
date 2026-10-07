@@ -51,7 +51,7 @@ Two theme colours and two text modifiers, on the terminal's default foreground a
 
 There is no typeface: the terminal's font is the user's. Type is case and weight.
 
-- **Case:** lowercase throughout. The only capitals on screen are data (a path, an agent's output, `HH:MM` in an error from the parser), the keys `G` and `E`, and `MiB`.
+- **Case:** lowercase throughout. The only capitals on screen are data (a path, an agent's output, `HH:MM` in an error from the parser), the keys `G`, `E` and `S`, and `MiB`.
 - **Weight:** default, DIM and BOLD, with the roles given under Colors. No italic, no underline, no reverse video.
 
 ### The words
@@ -155,9 +155,10 @@ The last row: key (BOLD), a space, one word (DIM), two spaces.
 
 | Screen | Yields, rightmost first | Never leaves |
 | --- | --- | --- |
-| jobs | `enter open` `r run` or `x stop` `p pause` `s skip` `u resume` `e prompt` `n new` `E edit` `d delete`; with no job yet, only `n new` | `? help` `q quit` |
+| jobs | `S sync` when the scheduler is behind the file, then `enter open` `r run` or `x stop` `p pause` `s skip` `u resume` `e prompt` `n new` `E edit` `d delete`; with no job yet, only `n new` | `? help` `q quit` |
 | job | `enter log` `r run` or `x stop` `p pause` `s skip` `u resume` `e prompt` `E edit` `d delete` | `esc back` `? help` |
 | log | `↑↓ scroll` `g top` `G end` | `esc back` `? help` |
+| sync | `a apply` `↑↓ scroll` | `esc back` `? help` |
 | help | | `esc back` `q quit` |
 | form | `tab next`, then what the field takes: `←→ move` `space mark` on a choice, `enter line` on `args`, one argument to a line | `ctrl-s save` `esc cancel` |
 
@@ -227,14 +228,15 @@ One opened entry, with a fact to a field, in the order an entry reads: `name`, `
 ### Sync
 The scheduler runs what its units say, and the jobs file can be ahead of them. The list says so, and one screen shows by how much. The header reads `sync`.
 
-- **On the list**, a job the scheduler does not have as the file has it reads `not applied`, BOLD in the default foreground, after its coming run and a DIM ` · `: `next today 16:05 · not applied`. It is on the job screen too. The coming run is the file's word until then.
-- **The reminder** takes the notice row of the list when nothing else does, in the default foreground: `2 changes not applied: S to review`. It counts a unit whose job is gone, which has no entry to carry the word. `S sync` is then the first key of the bar, so a narrow bar keeps it.
-- **A change** is the first line of the job's entry without the marker: name, agent, schedule, and what the sync does where the state sits. A unit whose job is gone has only its name. There is no selection on this screen, and one rule closes the list.
+- **On the list**, a job the scheduler does not have as the file has it reads `not applied`, BOLD in the default foreground, where its coming run would be: that run is the file's word, not yet the scheduler's, and the file's time is the schedule on the line above. A job the sync cannot handle reads `sync error` there, red. Both are on the job screen too, and neither moves the strip off its column.
+- **The reminder** takes the notice row of the list when nothing else does, in the default foreground, the key BOLD: `2 changes not applied: S to review`. It counts a unit whose job is gone, which has no entry to carry the word, and a job that is `busy`. What the sync cannot do is not a change and is named apart: `2 changes not applied, 1 error: S to review`, or `1 error in the sync: S to review`. `S sync` is then the first key of the bar, so a narrow bar keeps it.
+- **A change** is the first line of the job's entry without the marker: name, agent, schedule, and what the sync does where the state sits. A unit whose job is gone has only its name. There is no selection on this screen, and one rule closes the list. A line too long for the terminal loses the end of its schedule, never the word at the edge; the same holds for the entries of the list.
 - **The words** are those of `otto sync` in the stem before and whole after: `add`, `update`, `remove` become `added`, `updated`, `removed`. `busy` is a job with a run in progress, left for a later sync. `error` is red; the others are told apart by the word.
 - **The reason** of an error is under its job, behind ` │ `, in the default foreground, in two rows at most. It ends in the file or the directory it is about, so one that does not fit keeps its end: the second row opens with `…`.
-- **The notice row**, DIM, says where the screen is in a list that does not fit (`1–8 of 12`) and what `busy` leaves unsaid: `busy: applied by a sync after its run ends`. After applying it counts: `3 applied, 1 not`.
+- **The notice row** says, DIM, where the screen is in a list that does not fit (`1–8 of 12`) and what `busy` leaves unsaid: `busy: sync again after its run ends`. After applying it counts first, in the default foreground because it is what happened: `3 applied, 1 not · busy: sync again after its run ends`, `0 applied, 1 not`. A part that does not fit is left out whole, the last first.
 - **Applying** is a question, and it counts only what the sync would do now, not what waits or cannot be done: `apply 2 changes?  y apply  n not now`. The bar offers `a apply` only while there is something to apply and nothing was applied yet; what was applied stays on screen until `esc`.
-- **Nothing to show** is said on the list, where `S` was pressed: `nothing to apply`, `no scheduler on this system`, `fix the jobs file before syncing`.
+- **Nothing to show** is said on the list, where `S` was pressed: `nothing to apply`, `no scheduler on this system`, `fix the jobs file before syncing`. `a` with only errors and busy jobs says `nothing can be applied now`. A preview emptied by a sync made elsewhere closes with `nothing left to apply`, and an apply that found nothing to do with `nothing was applied`.
+- **A jobs file that changed** between the look and the `y` is not applied: the screen shows one `error`, named `*` as an error of the whole sync is, with `the jobs file changed: review the sync again`.
 
 ## Do's and Don'ts
 

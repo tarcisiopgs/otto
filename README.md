@@ -124,11 +124,11 @@ No day marked means every day. Arguments the form cannot hold on a line each (on
 
 ### Applying the sync
 
-**A job created, edited or deleted here is not scheduled until the sync is applied**, the same as after editing the file by hand. The list says so: a job the scheduler does not have as the file has it reads `not applied` beside its next run, and the line above the keys counts what is waiting.
+**A job created, edited or deleted here is not scheduled until the sync is applied**, the same as after editing the file by hand. The list says so: a job the scheduler does not have as the file has it reads `not applied` where its next run would be, and the line above the keys counts what is waiting. A job the sync cannot handle, such as one whose prompt file is gone, reads `sync error` there and is counted apart.
 
 `S` shows what a sync would do, one job to a line: `add`, `update`, `remove`, or `error` with the reason under it. A job with a run in progress reads `busy` and is left for a later sync. Nothing is touched until `a`, which asks first, and `y`. The screen then says what was done in the words of `otto sync`: `added`, `updated`, `removed`.
 
-It is the same sync as the command, with the jobs file and the `PATH` otto was opened with. What is listed is what a sync would do at that moment; the sync that runs reads the jobs file again.
+It is the same sync as the command, with the jobs file and the `PATH` otto was opened with. What is applied is what was listed: if the jobs file changed or went away after the screen last read it, nothing is applied and the screen asks for another look. A jobs file that is missing removes nothing.
 
 The screen needs a terminal of at least 60 columns by 12 rows. Where there is no terminal (a pipe, a script), `otto` alone prints the help and exits with 2. It uses your terminal's own colours and background.
 
