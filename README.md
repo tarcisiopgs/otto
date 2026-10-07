@@ -1,6 +1,9 @@
 # otto
 
-![otto — scheduled runs for coding agents](assets/otto-banner.webp)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/otto-banner-dark.webp">
+  <img alt="otto: scheduled runs for coding agents, on the scheduler your OS already has" src="assets/otto-banner-light.webp">
+</picture>
 
 **Scheduled runs for coding agents, on the scheduler your OS already has.**
 
