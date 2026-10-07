@@ -9,9 +9,31 @@
 
 otto runs Claude Code or Codex on a schedule, without a session, a desktop app or a daemon of its own left open. You describe a job (which agent, which prompt, where and when) and otto hands it to the native scheduler: launchd on macOS, systemd timers on Linux. The agent runs on your machine, with your local tools, credentials and memory.
 
+You manage it from one screen in the terminal. Create a job, write its prompt, see when it runs next and how its last runs went, read what the agent wrote, skip a day. A run that fails shows a notification.
+
+- **No daemon and no desktop app.** The operating system does the waking. otto writes the unit the scheduler understands and gets out of the way: between two runs, nothing of otto is running.
+- **It knows what an agent routine is.** A job is an agent, a prompt and a time. Every run leaves a record: when it started, how it ended, how long it took and what the agent wrote.
+- **Claude Code and Codex**, side by side in the same list.
+- **Permissions are yours.** What an agent may do is what you write in the job. otto passes it on and never adds to it.
+
 The name comes from Otto, the school bus driver: he shows up on schedule. It also sounds like "auto".
 
-> **Status: early.** Jobs are scheduled for real with `otto sync`, every run is recorded, and a run that fails tells you. See [Roadmap](#roadmap).
+> **Status: early.** Scheduling, the history of runs, the terminal UI and notifications are built, on macOS and Linux. Windows is [experimental](#windows-experimental). See the [Roadmap](#roadmap) for what is not.
+
+## Quick start
+
+```sh
+brew install tarcisiopgs/tap/otto    # or: npm install -g @tarcisiopgs/otto
+otto
+```
+
+1. **`n` creates a job.** The form asks for its name, the agent, the time and the days, the directory the agent runs in and the prompt file. `ctrl-s` saves, and a prompt file that is not there yet is created and opened in your editor.
+2. **`S` schedules it.** The new job reads `not applied`: it is in your jobs file and the scheduler does not know it yet. `S` shows what the scheduler would be told, and `a` then `y` tells it.
+3. **The OS runs it.** At its time, whether or not otto or any terminal is open. Open `otto` again to see how it went and read the output, or wait for the notification if it failed.
+
+A scheduled run has nobody to answer a permission prompt, so the agent needs what it may do granted up front, in the job's arguments: `--permission-mode auto` for Claude Code, for one. The form starts them empty and otto suggests none.
+
+The screen is not the only way in. There is [a command](#commands) for running, pausing, skipping, syncing and reading the output of a job, and every job is a few lines of [a file you can edit by hand](#the-jobs-file).
 
 ## Install
 
@@ -43,41 +65,6 @@ No apt repository is involved, so a new version is installed the same way.
 
 After an upgrade by any of these, run `otto sync`: it rewrites the units when what they should contain has changed.
 
-## A job
-
-`~/.config/otto/jobs.toml`:
-
-```toml
-[jobs.linear-updates]
-agent = "claude"                       # claude | codex
-prompt = "prompts/linear-updates.md"   # relative to this file
-workdir = "~/Workspace/app"            # where the agent runs
-schedule = { at = "16:05", days = ["mon", "tue", "wed", "thu", "fri"] }
-args = ["--permission-mode", "auto"]   # extra arguments for the agent CLI
-notify = "finish"                      # off | failures | finish | all; failures when left out
-```
-
-A scheduled run has nobody to answer permission prompts, so `args` is where the agent gets its permissions up front. otto adds none on its own.
-
-## Commands
-
-```sh
-otto list                          # the configured jobs
-otto sync                          # make the OS scheduler match the jobs file
-otto sync --dry-run                # print what sync would change
-otto run linear-updates            # run a job now, in the foreground
-otto run linear-updates --dry-run  # print the agent command instead
-otto plan linear-updates           # print the launchd/systemd unit sync would write
-otto skip linear-updates           # skip the next scheduled run
-otto pause linear-updates          # no scheduled runs until resumed
-otto resume linear-updates         # clear pause and skip
-otto runs linear-updates           # the runs of a job, newest first
-otto log linear-updates            # the output of the latest run
-otto log linear-updates <run-id>   # the output of one run
-```
-
-`--config <file>` points at a different jobs file. [`examples/jobs.toml`](examples/jobs.toml) is a starting point.
-
 ## The terminal UI
 
 `otto` with no subcommand opens a screen with every job: when it runs next, its state, how its last run ended and a strip of marks for its latest runs (`✓` ok, `✗` failed, `·` did not start the agent, `!` interrupted, `●` running). It updates by itself, so a scheduled run shows up when it starts.
@@ -92,7 +79,7 @@ otto log linear-updates <run-id>   # the output of one run
  │ no next run                        ✓ ✓ ·      last ok · 2m 14s
  ├──────────────────────────────────────────────────────────────────
 
- enter open  x stop  p pause  s skip  u resume  e prompt  ? help  q quit
+ enter open  x stop  p pause  s skip  e prompt  n new  ? help  q quit
 ```
 
 | Key | What it does |
@@ -137,6 +124,44 @@ No day marked means every day. Arguments the form cannot hold on a line each (on
 It is the same sync as the command, with the jobs file and the `PATH` otto was opened with. What is applied is what was listed: if the jobs file changed or went away after the screen last read it, nothing is applied and the screen asks for another look. A jobs file that is missing removes nothing.
 
 The screen needs a terminal of at least 60 columns by 12 rows. Where there is no terminal (a pipe, a script), `otto` alone prints the help and exits with 2. It uses your terminal's own colours and background.
+
+## The jobs file
+
+The jobs live in `~/.config/otto/jobs.toml`. The terminal UI writes it for you and keeps your comments and your layout; it is also yours to edit by hand, followed by an `otto sync`.
+
+```toml
+[jobs.linear-updates]
+agent = "claude"                       # claude | codex
+prompt = "prompts/linear-updates.md"   # relative to this file
+workdir = "~/Workspace/app"            # where the agent runs
+schedule = { at = "16:05", days = ["mon", "tue", "wed", "thu", "fri"] }
+args = ["--permission-mode", "auto"]   # extra arguments for the agent CLI
+notify = "finish"                      # off | failures | finish | all; failures when left out
+```
+
+A scheduled run has nobody to answer permission prompts, so `args` is where the agent gets its permissions up front. otto adds none on its own.
+
+Leave `days` out for every day, and `notify` out to hear only of [failures](#notifications). [`examples/jobs.toml`](examples/jobs.toml) is a starting point.
+
+## Commands
+
+```sh
+otto                               # the terminal UI
+otto list                          # the jobs, their state, last and next run
+otto sync                          # make the OS scheduler match the jobs file
+otto sync --dry-run                # print what sync would change
+otto run linear-updates            # run a job now, in the foreground
+otto run linear-updates --dry-run  # print the agent command instead
+otto plan linear-updates           # print the launchd/systemd unit sync would write
+otto skip linear-updates           # skip the next scheduled run
+otto pause linear-updates          # no scheduled runs until resumed
+otto resume linear-updates         # clear pause and skip
+otto runs linear-updates           # the runs of a job, newest first
+otto log linear-updates            # the output of the latest run
+otto log linear-updates <run-id>   # the output of one run
+```
+
+`otto` alone opens the [terminal UI](#the-terminal-ui). `--config <file>` points at a different jobs file.
 
 ## Scheduling
 
