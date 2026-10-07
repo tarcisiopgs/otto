@@ -23,7 +23,12 @@ agent = "claude"
 prompt = "prompt.md"
 workdir = "job"
 schedule = { at = "03:00" }
+notify = "all"
 "@
+# `notify = "all"` makes the run ask for a toast when it starts and when it
+# ends. A runner has no desktop to show one on: what is checked is that the
+# run ends as it would without it. A toast that could not be shown says so in
+# the output of the run, which `otto log` prints below.
 
 # Task Scheduler starts a task with the environment the user has in the
 # registry, not with this shell's, so the fake agent goes on both.

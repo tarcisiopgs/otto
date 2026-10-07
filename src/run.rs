@@ -1,7 +1,7 @@
 //! One run of a job: decide whether it happens, start the agent, keep its
 //! output and close the record.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use jiff::Timestamp;
+use jiff::tz::TimeZone;
 
+use crate::notify::{Event, Level, Notifier, message};
 use crate::scheduler::runner::Runner;
 use crate::store::{Outcome, State, Store, Trigger};
 
@@ -22,6 +24,10 @@ pub struct Request<'a> {
     pub command: &'a dyn Fn() -> Result<Vec<String>>,
     pub workdir: &'a Path,
     pub trigger: Trigger,
+    /// Which of its runs the job tells the user about.
+    pub notify: Level,
+    /// The time zone a notification gives the hour in.
+    pub zone: &'a TimeZone,
 }
 
 /// Runs the request and returns the code otto should exit with.
@@ -32,6 +38,7 @@ pub fn execute(
     request: &Request,
     store: &Store,
     runner: &dyn Runner,
+    notifier: &dyn Notifier,
     now: &dyn Fn() -> Timestamp,
 ) -> Result<u8> {
     let job = request.job;
@@ -40,6 +47,7 @@ pub fn execute(
         let state = store.state(job)?;
         if state.paused {
             store.record(job, request.trigger, Outcome::Paused, now())?;
+            tell(request, notifier, &Event::Paused, None);
             return Ok(0);
         }
         if state.skip_next {
@@ -51,6 +59,8 @@ pub fn execute(
                     ..state
                 },
             )?;
+            let reason = "skip next";
+            tell(request, notifier, &Event::Skipped { reason }, None);
             return Ok(0);
         }
     }
@@ -58,6 +68,8 @@ pub fn execute(
     if store.is_running(job, runner, now())? {
         if scheduled {
             store.record(job, request.trigger, Outcome::Skipped, now())?;
+            let reason = "already running";
+            tell(request, notifier, &Event::Skipped { reason }, None);
             return Ok(0);
         }
         bail!("{job} is already running");
@@ -68,9 +80,33 @@ pub fn execute(
     let log = store.log_path(job, &run.id)?;
     // From here on a failure belongs to this run: nobody watches a scheduled
     // run, so the reason has to be where `otto log` finds it.
-    match (request.command)().and_then(|argv| start(request, &argv, &log)) {
+    // Told once the agent is a process: a run that cannot start is a failure
+    // and nothing else.
+    let started = || {
+        let at = run.started.to_zoned(request.zone.clone());
+        let trigger = request.trigger;
+        tell(
+            request,
+            notifier,
+            &Event::Started { trigger, at: &at },
+            Some(&log),
+        );
+    };
+    // The record is closed before its end is told: whatever becomes of the
+    // notification, the history has the run as it ended.
+    match (request.command)().and_then(|argv| start(request, &argv, &log, &started)) {
         Ok(status) => {
-            store.finish(job, &run, status.code(), now())?;
+            let done = store.finish(job, &run, status.code(), now())?;
+            let seconds = done.seconds().unwrap_or(0);
+            let event = match status.code() {
+                Some(0) => Event::Ok { seconds },
+                code => Event::Failed {
+                    code,
+                    seconds,
+                    reason: None,
+                },
+            };
+            tell(request, notifier, &event, Some(&log));
             Ok(match status.code() {
                 Some(0) => 0,
                 Some(code) => u8::try_from(code).unwrap_or(1),
@@ -83,20 +119,54 @@ pub fn execute(
             }
             // Closed here, or the job would count as running until someone looked.
             store.finish(job, &run, None, now())?;
+            let reason = format!("{error:#}");
+            let event = Event::Failed {
+                code: None,
+                seconds: 0,
+                reason: Some(&reason),
+            };
+            tell(request, notifier, &event, Some(&log));
             Err(error)
         }
     }
 }
 
+/// Tells the user of `event` when the job tells of it. A notification that
+/// cannot be shown never changes the run: why goes to the output of the run,
+/// or to otto's own when the run has none.
+fn tell(request: &Request, notifier: &dyn Notifier, event: &Event, log: Option<&Path>) {
+    if !request.notify.tells(event) {
+        return;
+    }
+    let Err(error) = notifier.notify(&message(request.job, event)) else {
+        return;
+    };
+    let line = format!("otto: cannot notify: {error:#}");
+    let kept = log.and_then(|log| OpenOptions::new().create(true).append(true).open(log).ok());
+    match kept {
+        Some(mut file) => {
+            let _ = writeln!(file, "{line}");
+        }
+        None => eprintln!("{line}"),
+    }
+}
+
 /// Starts the agent and waits for it, with its output kept in `log`.
-fn start(request: &Request, argv: &[String], log: &Path) -> Result<ExitStatus> {
+/// `started` is called once the agent is a process.
+fn start(request: &Request, argv: &[String], log: &Path, started: &dyn Fn()) -> Result<ExitStatus> {
     let (program, args) = argv.split_first().context("empty agent command")?;
     // Checked here because the OS reports a missing directory as if the
     // program were the thing not found.
     if !request.workdir.is_dir() {
         bail!("working directory not found: {}", request.workdir.display());
     }
-    let file = File::create(log).with_context(|| format!("cannot write {}", log.display()))?;
+    // Appending, because the agent is not the only one that writes here: a
+    // line of otto's own must not be written over.
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .with_context(|| format!("cannot write {}", log.display()))?;
     let mut command = command_for(program);
     // No terminal is attached on a scheduled run, so the agent gets no stdin.
     command
@@ -109,11 +179,13 @@ fn start(request: &Request, argv: &[String], log: &Path) -> Result<ExitStatus> {
         let errors = file
             .try_clone()
             .with_context(|| format!("cannot write {}", log.display()))?;
-        return command
+        let mut child = command
             .stdout(file)
             .stderr(errors)
-            .status()
-            .with_context(cannot_start);
+            .spawn()
+            .with_context(cannot_start)?;
+        started();
+        return child.wait().with_context(cannot_start);
     }
 
     // A manual run is watched: the output goes to the terminal and to the log.
@@ -123,6 +195,7 @@ fn start(request: &Request, argv: &[String], log: &Path) -> Result<ExitStatus> {
         .stderr(Stdio::piped())
         .spawn()
         .with_context(cannot_start)?;
+    started();
     let (done, drained) = mpsc::channel();
     let mut copies = 0;
     if let Some(stdout) = child.stdout.take() {
@@ -206,6 +279,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::notify::{Message, Recording};
     use crate::scheduler::runner::Recorder;
     use crate::store::{Outcome, Run, State};
 
@@ -216,6 +290,8 @@ mod tests {
         _root: TempDir,
         store: Store,
         workdir: PathBuf,
+        level: Level,
+        notifier: Recording,
     }
 
     impl World {
@@ -228,11 +304,29 @@ mod tests {
                 _root: root,
                 store,
                 workdir,
+                level: Level::default(),
+                notifier: Recording::default(),
             }
         }
 
-        fn run_with(
+        fn telling(level: Level) -> World {
+            World {
+                level,
+                ..World::new()
+            }
+        }
+
+        /// What the user was told, as `title: body`.
+        fn told(&self) -> Vec<String> {
+            let told = self.notifier.told.borrow();
+            told.iter()
+                .map(|Message { title, body }| format!("{title}: {body}"))
+                .collect()
+        }
+
+        fn execute_with(
             &self,
+            notifier: &dyn Notifier,
             trigger: Trigger,
             command: &dyn Fn() -> Result<Vec<String>>,
             now: &str,
@@ -244,11 +338,23 @@ mod tests {
                     command,
                     workdir: &self.workdir,
                     trigger,
+                    notify: self.level,
+                    zone: &TimeZone::UTC,
                 },
                 &self.store,
                 &Recorder::new(),
+                notifier,
                 &|| now,
             )
+        }
+
+        fn run_with(
+            &self,
+            trigger: Trigger,
+            command: &dyn Fn() -> Result<Vec<String>>,
+            now: &str,
+        ) -> Result<u8> {
+            self.execute_with(&self.notifier, trigger, command, now)
         }
 
         fn run_at(&self, trigger: Trigger, argv: &[String], now: &str) -> Result<u8> {
@@ -491,5 +597,192 @@ mod tests {
         let run = world.last();
         assert_eq!(run.outcome, Outcome::Ok);
         assert!(world.log(&run).contains("done"));
+    }
+
+    #[test]
+    fn a_failed_run_tells_by_default() {
+        let world = World::new();
+        world.run(Trigger::Scheduled, &sh("exit 3")).unwrap();
+        assert_eq!(world.told(), ["report failed: exit 3 after 0s"]);
+    }
+
+    #[test]
+    fn a_run_that_ends_well_is_quiet_by_default() {
+        let world = World::new();
+        world.run(Trigger::Scheduled, &sh("true")).unwrap();
+        assert!(world.told().is_empty());
+    }
+
+    #[test]
+    fn finish_tells_of_a_good_run_too() {
+        let world = World::telling(Level::Finish);
+        world.run(Trigger::Scheduled, &sh("true")).unwrap();
+        assert_eq!(world.told(), ["report ok: 0s"]);
+    }
+
+    #[test]
+    fn all_tells_of_the_start_and_then_of_the_end() {
+        let world = World::telling(Level::All);
+        world.run(Trigger::Scheduled, &sh("true")).unwrap();
+        assert_eq!(
+            world.told(),
+            ["report started: scheduled, 19:16", "report ok: 0s"]
+        );
+        let world = World::telling(Level::All);
+        world.run(Trigger::Manual, &sh("exit 2")).unwrap();
+        assert_eq!(
+            world.told(),
+            [
+                "report started: manual, 19:16",
+                "report failed: exit 2 after 0s"
+            ]
+        );
+    }
+
+    #[test]
+    fn all_tells_of_a_run_that_did_not_happen() {
+        let world = World::telling(Level::All);
+        let paused = State {
+            paused: true,
+            skip_next: false,
+        };
+        world.store.set_state("report", paused).unwrap();
+        world.run(Trigger::Scheduled, &sh("true")).unwrap();
+        assert_eq!(world.told(), ["report paused: the job is paused"]);
+
+        let world = World::telling(Level::All);
+        let skip = State {
+            paused: false,
+            skip_next: true,
+        };
+        world.store.set_state("report", skip).unwrap();
+        world.run(Trigger::Scheduled, &sh("true")).unwrap();
+        assert_eq!(world.told(), ["report skipped: skip next"]);
+
+        let world = World::telling(Level::All);
+        let earlier = "2026-10-05T19:00:00Z".parse().unwrap();
+        world
+            .store
+            .begin("report", Trigger::Manual, 4242, earlier)
+            .unwrap();
+        world.run(Trigger::Scheduled, &sh("true")).unwrap();
+        assert_eq!(world.told(), ["report skipped: already running"]);
+    }
+
+    #[test]
+    fn a_run_that_does_not_happen_is_quiet_by_default() {
+        let world = World::new();
+        let paused = State {
+            paused: true,
+            skip_next: false,
+        };
+        world.store.set_state("report", paused).unwrap();
+        world.run(Trigger::Scheduled, &sh("true")).unwrap();
+        assert!(world.told().is_empty());
+    }
+
+    #[test]
+    fn off_never_tells() {
+        let world = World::telling(Level::Off);
+        world.run(Trigger::Scheduled, &sh("exit 3")).unwrap();
+        assert!(world.told().is_empty());
+    }
+
+    #[test]
+    fn a_run_that_could_not_start_tells_why_and_has_no_start() {
+        let world = World::telling(Level::All);
+        fs::remove_dir(&world.workdir).unwrap();
+        world.run(Trigger::Scheduled, &sh("true")).unwrap_err();
+        let told = world.told();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            told[0].starts_with("report failed: working directory not found"),
+            "{told:?}"
+        );
+
+        let world = World::telling(Level::All);
+        world
+            .run(Trigger::Manual, &["otto-no-such-program".to_owned()])
+            .unwrap_err();
+        let told = world.told();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            told[0].starts_with("report failed: cannot start otto-no-such-program"),
+            "{told:?}"
+        );
+    }
+
+    #[test]
+    fn a_notifier_that_fails_changes_nothing_of_the_run() {
+        let world = World {
+            notifier: Recording {
+                broken: Some("no notification service".to_owned()),
+                ..Recording::default()
+            },
+            ..World::telling(Level::All)
+        };
+        let code = world
+            .run(Trigger::Scheduled, &sh("echo hi; exit 3"))
+            .unwrap();
+        assert_eq!(code, 3);
+        let run = world.last();
+        assert_eq!((run.outcome, run.exit_code), (Outcome::Failed, Some(3)));
+        let log = world.log(&run);
+        assert!(log.contains("hi"), "{log}");
+        assert_eq!(
+            log.matches("otto: cannot notify: no notification service")
+                .count(),
+            2,
+            "{log}"
+        );
+    }
+
+    /// Looks at the history each time it is asked to tell something.
+    struct Looking<'a> {
+        store: &'a Store,
+        seen: std::cell::RefCell<Vec<(String, Outcome)>>,
+    }
+
+    impl Notifier for Looking<'_> {
+        fn notify(&self, message: &Message) -> Result<()> {
+            let runs = self
+                .store
+                .runs("report", &Recorder::new(), NOW.parse().unwrap())?;
+            self.seen
+                .borrow_mut()
+                .push((message.title.clone(), runs[0].outcome));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_record_is_closed_before_the_end_is_told() {
+        let world = World::telling(Level::All);
+        let looking = Looking {
+            store: &world.store,
+            seen: std::cell::RefCell::new(Vec::new()),
+        };
+        world
+            .execute_with(&looking, Trigger::Scheduled, &|| Ok(sh("exit 3")), NOW)
+            .unwrap();
+        assert_eq!(
+            *looking.seen.borrow(),
+            [
+                ("report started".to_owned(), Outcome::Running),
+                ("report failed".to_owned(), Outcome::Failed)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_manual_run_refused_tells_nothing() {
+        let world = World::telling(Level::All);
+        let earlier = "2026-10-05T19:00:00Z".parse().unwrap();
+        world
+            .store
+            .begin("report", Trigger::Scheduled, 4242, earlier)
+            .unwrap();
+        world.run(Trigger::Manual, &sh("true")).unwrap_err();
+        assert!(world.told().is_empty());
     }
 }

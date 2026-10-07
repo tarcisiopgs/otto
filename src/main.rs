@@ -228,6 +228,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             // The prompt is read once the run has a record: a prompt file that
             // went missing must show up in the history, not only on stderr.
             let command = || Ok(job.agent.command(&read_prompt()?, &job.args));
+            let zone = TimeZone::system();
             let request = Request {
                 job: &name,
                 command: &command,
@@ -237,8 +238,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 } else {
                     Trigger::Manual
                 },
+                notify: job.notify,
+                zone: &zone,
             };
-            let code = run::execute(&request, &store()?, &System, &Timestamp::now)?;
+            let notifier = notify::native(&System);
+            let code = run::execute(
+                &request,
+                &store()?,
+                &System,
+                notifier.as_ref(),
+                &Timestamp::now,
+            )?;
             Ok(ExitCode::from(code))
         }
         Cmd::Skip { job: name } => {

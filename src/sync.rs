@@ -505,6 +505,20 @@ mod tests {
     }
 
     #[test]
+    fn how_a_job_tells_of_its_runs_is_not_in_its_unit() {
+        let world = World::new();
+        let text = job("report", "claude", "prompt.md", "09:00");
+        world.sync(&text, false);
+
+        let louder = format!("{text}notify = \"all\"\n");
+        assert_eq!(
+            world.config(&louder).jobs["report"].notify,
+            crate::notify::Level::All
+        );
+        assert_eq!(world.sync(&louder, true), [pair("report", "unchanged")]);
+    }
+
+    #[test]
     fn dry_run_reports_busy_too() {
         let world = World::new();
         world.sync(&job("report", "claude", "prompt.md", "09:00"), false);

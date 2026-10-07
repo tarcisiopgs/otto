@@ -277,9 +277,11 @@ mod tests {
     fn a_job_without_notify_tells_of_failures() {
         let config = parse(EXAMPLE).unwrap();
         assert_eq!(
-            config.job("linear-updates").unwrap().notify,
+            config.job("morning-triage").unwrap().notify,
             Level::Failures
         );
+        // The other job of the example says how it tells.
+        assert_eq!(config.job("linear-updates").unwrap().notify, Level::Finish);
         let config = parse(&with_notify("")).unwrap();
         assert_eq!(config.job("nightly").unwrap().notify, Level::Failures);
     }

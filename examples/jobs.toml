@@ -9,6 +9,9 @@ schedule = { at = "16:05", days = ["mon", "tue", "wed", "thu", "fri"] }
 # Extra arguments for the agent CLI. A scheduled run has nobody to answer
 # permission prompts, so the agent needs its permissions granted up front.
 args = ["--permission-mode", "auto"]
+# Which runs show a notification: off, failures, finish or all. A job
+# without this line tells of failures.
+notify = "finish"
 
 [jobs.morning-triage]
 agent = "codex"
