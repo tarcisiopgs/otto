@@ -7,7 +7,7 @@ use crate::jobs_file::JobSpec;
 use crate::store::{Outcome, Run, State};
 use crate::sync;
 use crate::tui::form::{Edit, Form};
-use crate::tui::text::{cut, rows, wrapped};
+use crate::tui::text::{rows, tail, wrapped};
 use crate::tui::world::{JobView, Log, Pending, Snapshot};
 
 /// The rows a job takes on the list: two lines and the rule that closes it.
@@ -439,16 +439,15 @@ impl App {
     }
 
     /// Why a change cannot be made, as the rows the sync screen gives it: two
-    /// at most, the second cut where it has to be.
+    /// at most. A reason ends in the file or the directory it is about, so
+    /// one that does not fit loses its middle, not its end.
     pub fn reason_rows(&self, reason: &str) -> Vec<String> {
         let said = reason.split_whitespace().collect::<Vec<_>>().join(" ");
         let mut rows = wrapped(&said, self.columns);
         if rows.len() > 2 {
-            rows.truncate(2);
-            if let Some(end) = rows.last_mut() {
-                let kept = cut(end, self.columns.saturating_sub(1));
-                *end = format!("{}…", kept.trim_end_matches('…'));
-            }
+            rows.truncate(1);
+            let rest = said.strip_prefix(rows[0].as_str()).unwrap_or(&said);
+            rows.push(tail(rest.trim_start(), self.columns));
         }
         rows
     }
@@ -1987,7 +1986,10 @@ mod tests {
         );
         let rows = app.reason_rows("one two three four five six seven eight nine ten eleven");
         assert_eq!(rows.len(), 2);
-        assert!(rows[1].ends_with('…'), "{rows:?}");
+        // What it ends in is what it is about: the end is what is kept.
+        assert!(rows[1].starts_with('…'), "{rows:?}");
+        assert!(rows[1].ends_with("ten eleven"), "{rows:?}");
+        assert!(rows.iter().all(|row| crate::tui::text::width(row) <= 24));
         // One row for the job and two for why.
         assert_eq!(app.sync_rows(), 3);
     }

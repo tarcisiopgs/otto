@@ -32,4 +32,4 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 ## Unresolved
 
 - Impeccable does not recognise `terminal` as a platform and treats the project as web; its detector, comps and screenshots do not apply to a ratatui screen. The review of this surface is done on the text the screen renders.
-- The job form is drawn and described in DESIGN.md. The sync preview is drawn in a later pull request and inherits this world.
+- The job form and the sync screen are drawn and described in DESIGN.md.

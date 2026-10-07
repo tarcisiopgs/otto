@@ -206,6 +206,8 @@ Two columns that fit the eight body rows of the smallest terminal: the action ke
 | `s` | skip the next run | jobs, job |
 | `u` | resume the schedule (clears pause and skip) | jobs, job |
 | `e` | edit the prompt in the user's editor | jobs, job |
+| `S` | what a sync would do | jobs |
+| `a` | apply the sync | sync |
 | `y` | yes | question |
 | `n` `esc` `ctrl-c` | no | question |
 
@@ -219,14 +221,20 @@ One opened entry, with a fact to a field, in the order an entry reads: `name`, `
 - **The name of a job that exists** is DIM: it is shown, not offered.
 - **The notice row** says, in this order: why the job could not be saved, red, in the words of the jobs file, and it stays until the job changes while the focus goes to the field it names; on `args`, `a scheduled run has nobody to answer a permission prompt`, which is never out of sight there; what saving would run into, led by `note:` and never by `!`, since a note does not stop the save, and without the path the row above already shows (`note: workdir not found; codex not found in PATH`); and what the field in focus calls for (`24-hour time, as in 16:05`).
 - **Every letter is text** on this screen. Its shortcut bar is `tab next`, the keys the field in focus takes besides text, and always `ctrl-s save` `esc cancel`. Text pasted into the terminal goes into the field as text: a line break in it is not `enter`.
-- **After a save or a delete** the list says what is still to do, in the default foreground: `nightly saved; otto sync schedules it`. The list shows a job with a next run whether or not it has a unit.
+- **After a save or a delete** the list says what happened, in the default foreground: `nightly saved`. What is still to do is on the entry and in the reminder of the sync, below.
 - **Leaving a form that changed** is a question: `discard the changes?  y discard  n keep editing`. Deleting a job is one too: `delete <name>?  y delete  n keep`.
 
-### Screens not drawn yet
+### Sync
+The scheduler runs what its units say, and the jobs file can be ahead of them. The list says so, and one screen shows by how much. The header reads `sync`.
 
-The sync preview is not built. Nothing below is observed; it is what the rules above already decide for it.
-
-- **Sync preview:** one entry per job, the action where the state sits, right-aligned on the first line; the reason for an error behind ` │ `. `otto sync` already reports `added`, `updated`, `removed`, `unchanged`, `busy` and `error`; the preview uses the same stems. `error` is red; the others are told apart by the word. Applying it is a question in the shortcut bar, named after the action, answered with `y` and `n`.
+- **On the list**, a job the scheduler does not have as the file has it reads `not applied`, BOLD in the default foreground, after its coming run and a DIM ` · `: `next today 16:05 · not applied`. It is on the job screen too. The coming run is the file's word until then.
+- **The reminder** takes the notice row of the list when nothing else does, in the default foreground: `2 changes not applied: S to review`. It counts a unit whose job is gone, which has no entry to carry the word. `S sync` is then the first key of the bar, so a narrow bar keeps it.
+- **A change** is the first line of the job's entry without the marker: name, agent, schedule, and what the sync does where the state sits. A unit whose job is gone has only its name. There is no selection on this screen, and one rule closes the list.
+- **The words** are those of `otto sync` in the stem before and whole after: `add`, `update`, `remove` become `added`, `updated`, `removed`. `busy` is a job with a run in progress, left for a later sync. `error` is red; the others are told apart by the word.
+- **The reason** of an error is under its job, behind ` │ `, in the default foreground, in two rows at most. It ends in the file or the directory it is about, so one that does not fit keeps its end: the second row opens with `…`.
+- **The notice row**, DIM, says where the screen is in a list that does not fit (`1–8 of 12`) and what `busy` leaves unsaid: `busy: applied by a sync after its run ends`. After applying it counts: `3 applied, 1 not`.
+- **Applying** is a question, and it counts only what the sync would do now, not what waits or cannot be done: `apply 2 changes?  y apply  n not now`. The bar offers `a apply` only while there is something to apply and nothing was applied yet; what was applied stays on screen until `esc`.
+- **Nothing to show** is said on the list, where `S` was pressed: `nothing to apply`, `no scheduler on this system`, `fix the jobs file before syncing`.
 
 ## Do's and Don'ts
 
