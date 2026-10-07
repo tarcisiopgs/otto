@@ -1,6 +1,10 @@
 //! One backend per operating system scheduler. otto never runs a daemon of its
 //! own: it writes the unit the OS scheduler understands and lets it wake `otto run`.
 
+// Only the tests that build a machine out of executable files use it.
+#[cfg(test)]
+#[cfg(unix)]
+pub mod fake;
 mod launchd;
 pub mod runner;
 mod systemd;

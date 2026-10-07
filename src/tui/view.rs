@@ -11,6 +11,7 @@ use crate::agent::Agent;
 use crate::config::{Schedule, Weekday};
 use crate::next::{self, Next};
 use crate::store::{Outcome, Run};
+use crate::sync;
 use crate::tui::app::{App, Confirm, ENTRY, Screen};
 use crate::tui::form::{Field, Focus, Form};
 use crate::tui::text::{cut, fit, tail, width as width_in_columns, wrapped};
@@ -63,6 +64,7 @@ pub fn draw(frame: &mut Frame, app: &App, now: &Zoned) {
         Screen::Job => job(app, now, width, rows),
         Screen::Log => log(app, rows),
         Screen::Help => help(),
+        Screen::Sync => changes(app, width, rows),
         Screen::Form => match &app.form {
             Some(form) => {
                 let (lines, at) = fields(form, width);
@@ -157,6 +159,7 @@ fn header<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Line<'a> 
             None => name.to_owned(),
         },
         Screen::Help => "help".to_owned(),
+        Screen::Sync => "sync".to_owned(),
         Screen::Form => match app.form.as_ref().and_then(|form| form.editing.as_deref()) {
             Some(job) => format!("edit {job}"),
             None => "new job".to_owned(),
@@ -310,11 +313,17 @@ fn strip(job: &JobView, count: usize) -> Vec<Span<'static>> {
 /// coming run given the room of an ordinary one, and the ending gives up its
 /// duration, then the word `last`. Only then does the line let go of the
 /// shared column, and last of all of its oldest marks.
-fn second_line(job: &JobView, now: &Zoned, width: usize) -> Line<'static> {
-    let lead = vec![
+fn second_line(job: &JobView, unapplied: bool, now: &Zoned, width: usize) -> Line<'static> {
+    let mut lead = vec![
         Span::styled(" │ ", dim()),
         Span::raw(coming(job.next.as_ref(), now)),
     ];
+    // The scheduler does not have the job as the file has it: the coming run
+    // is the file's word, not yet the scheduler's.
+    if unapplied {
+        lead.push(Span::styled(" · ", dim()));
+        lead.push(Span::styled("not applied", strong()));
+    }
     let edge = width.saturating_sub(1);
     let endings = last(job, now);
     let marks = strip(job, STRIP);
@@ -481,7 +490,8 @@ fn jobs<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a
     let first = first_visible(selected.unwrap_or(0), visible);
     for (index, job) in all.iter().enumerate().skip(first).take(visible.max(1)) {
         lines.push(first_line(job, selected == Some(index), true, width));
-        lines.push(second_line(job, now, width));
+        let unapplied = app.snapshot.pending_for(&job.name).is_some();
+        lines.push(second_line(job, unapplied, now, width));
         lines.push(rule(width));
     }
     lines
@@ -507,7 +517,8 @@ fn job<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a>
     let mut lines = problem(app, width);
     // The same entry the list shows, opened: its facts and its runs follow.
     lines.push(first_line(job, true, false, width));
-    lines.push(second_line(job, now, width));
+    let unapplied = app.snapshot.pending_for(&job.name).is_some();
+    lines.push(second_line(job, unapplied, now, width));
     // On a short terminal the facts give way to the runs.
     if sheet(rows.saturating_sub(lines.len() - 2)) == SHEET {
         lines.push(fact(
@@ -567,6 +578,73 @@ fn log(app: &App, rows: usize) -> Vec<Line<'_>> {
         .take(rows)
         .map(|row| behind(row, Style::new()))
         .collect()
+}
+
+/// What a sync would do with a job, in the stem of what `otto sync` reports
+/// once it did it: `add` before, `added` after.
+fn stem(action: sync::Action) -> &'static str {
+    match action {
+        sync::Action::Add => "add",
+        sync::Action::Update => "update",
+        sync::Action::Remove => "remove",
+        sync::Action::Unchanged => "unchanged",
+        sync::Action::Busy => "busy",
+    }
+}
+
+/// The sync: each job it touches as the first line of its entry, with what
+/// is done to it where the state sits, and under it why it cannot be done.
+fn changes(app: &App, width: usize, rows: usize) -> Vec<Line<'_>> {
+    let mut lines = Vec::new();
+    for change in app.changes() {
+        let mut left = vec![Span::raw("  "), Span::raw(fit(&change.job, 20))];
+        // A unit whose job is gone has only its name left.
+        if let Some(job) = app.snapshot.jobs.iter().find(|job| job.name == change.job) {
+            left.push(Span::raw(format!("  {:<8}", job.job.agent.program())));
+            left.push(Span::raw(schedule(&job.job.schedule)));
+        }
+        let word = match &change.change {
+            Ok(action) if app.applied() => Span::raw(action.label()),
+            Ok(action) => Span::raw(stem(*action)),
+            Err(_) => Span::styled("error", bad()),
+        };
+        lines.push(between(left, vec![word], width));
+        if let Err(reason) = &change.change {
+            for row in app.reason_rows(reason) {
+                lines.push(Line::from(vec![Span::styled(" │ ", dim()), Span::raw(row)]));
+            }
+        }
+    }
+    lines.push(rule(width));
+    lines.into_iter().skip(app.sync_top()).take(rows).collect()
+}
+
+/// What the sync screen says under its list: where it is in a list that does
+/// not fit, and what its words leave unsaid.
+fn about_the_sync(app: &App) -> String {
+    use sync::Action::{Add, Busy, Remove, Update};
+    let all = app.changes();
+    if app.applied() {
+        let done = all
+            .iter()
+            .filter(|change| matches!(change.change, Ok(Add | Update | Remove)))
+            .count();
+        return match (done, all.len() - done) {
+            (0, _) => "nothing applied".to_owned(),
+            (done, 0) => format!("{done} applied"),
+            (done, not) => format!("{done} applied, {not} not"),
+        };
+    }
+    let mut parts = Vec::new();
+    let total = app.sync_rows();
+    if total > app.page {
+        let first = app.sync_top();
+        parts.push(format!("{}–{} of {total}", first + 1, first + app.page));
+    }
+    if all.iter().any(|change| change.change == Ok(Busy)) {
+        parts.push("busy: applied by a sync after its run ends".to_owned());
+    }
+    parts.join(" · ")
 }
 
 /// Where the value of a field starts: after the marker, the margin rule and
@@ -722,8 +800,8 @@ const ACTIONS: [(&str, &str); 8] = [
     ("x", "stop the run in progress"),
     ("p s u", "pause, skip next, resume"),
     ("e", "edit the prompt"),
-    ("n", "new job"),
-    ("E d", "edit, delete the job"),
+    ("n E d", "new, edit, delete a job"),
+    ("S", "review and apply the sync"),
 ];
 
 const MOVES: [(&str, &str); 5] = [
@@ -802,6 +880,17 @@ fn notice(app: &App, width: usize) -> Line<'_> {
         };
         return Line::raw(format!(" {}", cut(&text, room)));
     }
+    if app.screen == Screen::Sync {
+        return Line::styled(format!(" {}", cut(&about_the_sync(app), room)), dim());
+    }
+    // The list says that the scheduler is behind the jobs file, and the way
+    // to the screen that shows by how much.
+    let behind = app.snapshot.pending.len();
+    if app.screen == Screen::Jobs && behind > 0 {
+        let changes = if behind == 1 { "change" } else { "changes" };
+        let text = format!("{behind} {changes} not applied: S to review");
+        return Line::raw(format!(" {}", cut(&text, room)));
+    }
     // And the log screen says where it is in the output.
     let (Screen::Log, Some(log)) = (&app.screen, &app.log) else {
         return Line::default();
@@ -839,6 +928,10 @@ fn bar(app: &App, width: usize) -> Line<'_> {
                 "discard",
                 "keep editing",
             ),
+            Confirm::Apply { changes } => {
+                let noun = if *changes == 1 { "change" } else { "changes" };
+                (format!(" apply {changes} {noun}?"), "apply", "not now")
+            }
         };
         return Line::from(vec![
             Span::styled(question, strong()),
@@ -869,14 +962,19 @@ fn bar(app: &App, width: usize) -> Line<'_> {
     // `always` shows whatever the width: the way back, to the help and out.
     // The actions give way to it on a narrow terminal, last first.
     let manage: [Key; 2] = [("E", "edit"), ("d", "delete")];
+    // First, so that a narrow bar keeps it: it is what is waiting.
+    let behind: Option<Key> = (!app.snapshot.pending.is_empty()).then_some(("S", "sync"));
     let (actions, always): (Vec<Key>, [Key; 2]) = match app.screen {
-        // With no job yet, creating one is all there is to do.
-        Screen::Jobs if app.snapshot.jobs.is_empty() => {
-            (vec![("n", "new")], [("?", "help"), ("q", "quit")])
-        }
+        // With no job yet, creating one is all there is to do, unless a
+        // unit was left behind by a job that is gone.
+        Screen::Jobs if app.snapshot.jobs.is_empty() => (
+            behind.into_iter().chain([("n", "new")]).collect(),
+            [("?", "help"), ("q", "quit")],
+        ),
         Screen::Jobs => (
-            [("enter", "open")]
+            behind
                 .into_iter()
+                .chain([("enter", "open")])
                 .chain(job)
                 .chain([("n", "new")])
                 .chain(manage)
@@ -912,6 +1010,16 @@ fn bar(app: &App, width: usize) -> Line<'_> {
             vec![("↑↓", "scroll"), ("g", "top"), ("G", "end")],
             [("esc", "back"), ("?", "help")],
         ),
+        Screen::Sync => {
+            let mut keys: Vec<Key> = Vec::new();
+            if !app.applied() && app.applicable() > 0 {
+                keys.push(("a", "apply"));
+            }
+            if app.sync_rows() > app.page {
+                keys.push(("↑↓", "scroll"));
+            }
+            (keys, [("esc", "back"), ("?", "help")])
+        }
         Screen::Help => (Vec::new(), [("esc", "back"), ("q", "quit")]),
     };
     let size = |(key, what): &Key| width_in_columns(key) + 1 + width_in_columns(what) + 2;
@@ -949,9 +1057,10 @@ mod tests {
     use crate::config::{Job, Schedule, Weekday};
     use crate::next::Next;
     use crate::store::{Outcome, Run, State, Trigger};
+    use crate::sync;
     use crate::tui::app::{Action, Notice};
     use crate::tui::form::{Edit, Focus};
-    use crate::tui::world::{JobView, Log, Snapshot};
+    use crate::tui::world::{JobView, Log, Pending, Snapshot};
 
     fn local(text: &str) -> Zoned {
         text.parse::<DateTime>()
@@ -1023,7 +1132,7 @@ mod tests {
         App::new(Snapshot {
             config: PathBuf::from("/home/me/.config/otto/jobs.toml"),
             jobs,
-            error: None,
+            ..Snapshot::default()
         })
     }
 
@@ -1360,8 +1469,8 @@ mod tests {
             "stop the run in progress",
             "pause, skip next, resume",
             "edit the prompt",
-            "new job",
-            "edit, delete the job",
+            "new, edit, delete a job",
+            "review and apply the sync",
             "quit",
         ] {
             assert!(text.contains(expected), "{expected:?} is missing:\n{text}");
@@ -1934,5 +2043,203 @@ mod tests {
         let text = screen(&app(vec![report()]), MIN.0, MIN.1);
         assert!(text.contains("▸ report"));
         assert!(text.contains("failed (3)"));
+    }
+
+    fn pend(job: &str, change: Result<sync::Action, &str>) -> Pending {
+        Pending {
+            job: job.to_owned(),
+            change: change.map_err(str::to_owned),
+        }
+    }
+
+    /// `report` and `triage` in the jobs file, with this still to apply.
+    fn unsynced(pending: Vec<Pending>) -> App {
+        App::new(Snapshot {
+            config: PathBuf::from("/home/me/.config/otto/jobs.toml"),
+            jobs: vec![job("report"), job("triage")],
+            pending,
+            can_sync: true,
+            ..Snapshot::default()
+        })
+    }
+
+    /// Every kind of change at once.
+    fn every_change() -> Vec<Pending> {
+        vec![
+            pend("report", Ok(sync::Action::Add)),
+            pend(
+                "triage",
+                Err("prompt file not found: /home/me/work/prompts/triage.md"),
+            ),
+            pend("nightly", Ok(sync::Action::Busy)),
+            pend("old", Ok(sync::Action::Remove)),
+        ]
+    }
+
+    #[test]
+    fn a_job_that_is_not_applied_says_so_on_its_entry() {
+        let app = unsynced(vec![pend("report", Ok(sync::Action::Update))]);
+        let text = screen(&app, 78, 20);
+        let rows: Vec<&str> = text.lines().collect();
+        assert!(rows[3].contains("next today 16:05 · not applied"), "{text}");
+        assert!(!rows[6].contains("not applied"), "{text}");
+        assert!(
+            rows[18].starts_with(" 1 change not applied: S to review"),
+            "{text}"
+        );
+        assert!(rows[19].starts_with(" S sync  enter open"), "{text}");
+    }
+
+    #[test]
+    fn a_unit_to_remove_counts_though_it_has_no_entry() {
+        let app = unsynced(vec![
+            pend("report", Ok(sync::Action::Add)),
+            pend("old", Ok(sync::Action::Remove)),
+        ]);
+        let text = screen(&app, 60, 12);
+        assert!(
+            text.contains(" 2 changes not applied: S to review"),
+            "{text}"
+        );
+        for row in text.lines() {
+            assert!(width_in_columns(row.trim_end()) < 60, "{row}");
+        }
+    }
+
+    #[test]
+    fn with_nothing_pending_the_list_does_not_mention_the_sync() {
+        let app = unsynced(Vec::new());
+        let text = screen(&app, 78, 20);
+        assert!(!text.contains("not applied"), "{text}");
+        assert!(!text.contains("S sync"), "{text}");
+    }
+
+    #[test]
+    fn a_notice_comes_before_the_reminder_of_the_sync() {
+        let mut app = unsynced(vec![pend("report", Ok(sync::Action::Add))]);
+        app.notice = Some(Notice {
+            text: "report saved".to_owned(),
+            error: false,
+        });
+        let text = screen(&app, 78, 20);
+        assert!(text.contains(" report saved"), "{text}");
+        assert!(!text.contains("S to review"), "{text}");
+    }
+
+    #[test]
+    fn the_preview_lists_what_the_sync_would_do() {
+        let mut app = unsynced(every_change());
+        app.act(Action::Sync);
+        app.columns = columns(78);
+        let text = screen(&app, 78, 20);
+        let rows: Vec<&str> = text.lines().collect();
+        assert!(rows[0].starts_with(" otto · sync"), "{text}");
+        assert!(rows[2].starts_with("  report"), "{text}");
+        assert!(rows[2].contains("claude  16:05 mon–fri"), "{text}");
+        assert!(rows[2].trim_end().ends_with(" add"), "{text}");
+        assert!(rows[3].trim_end().ends_with(" error"), "{text}");
+        assert_eq!(
+            rows[4].trim_end(),
+            " │ prompt file not found: /home/me/work/prompts/triage.md"
+        );
+        assert!(rows[5].starts_with("  nightly"), "{text}");
+        assert!(rows[5].trim_end().ends_with(" busy"), "{text}");
+        assert!(rows[6].trim_end().ends_with(" remove"), "{text}");
+        assert!(rows[7].starts_with(" ├──"), "{text}");
+        assert!(
+            rows[18].contains("busy: applied by a sync after its run ends"),
+            "{text}"
+        );
+        assert_eq!(rows[19].trim_end(), " a apply  esc back  ? help");
+    }
+
+    #[test]
+    fn the_preview_fits_the_smallest_terminal() {
+        let mut app = unsynced(every_change());
+        app.act(Action::Sync);
+        app.columns = columns(60);
+        app.page = page(12);
+        let text = screen(&app, 60, 12);
+        let rows: Vec<&str> = text.lines().collect();
+        for row in &rows {
+            assert!(width_in_columns(row.trim_end()) < 60, "{row}");
+        }
+        assert_eq!(
+            rows[4].trim_end(),
+            " │ prompt file not found: /home/me/work/prompts/triage.md"
+        );
+        assert!(rows[11].starts_with(" a apply  esc back  ? help"), "{text}");
+    }
+
+    #[test]
+    fn a_preview_longer_than_the_screen_offers_to_scroll() {
+        let many = (0..12)
+            .map(|n| pend(&format!("job-{n:02}"), Ok(sync::Action::Add)))
+            .collect();
+        let mut app = unsynced(many);
+        app.act(Action::Sync);
+        app.page = page(12);
+        app.columns = columns(60);
+        let text = screen(&app, 60, 12);
+        assert!(text.contains("job-00"), "{text}");
+        assert!(!text.contains("job-08"), "{text}");
+        assert!(text.contains(" 1–8 of 12"), "{text}");
+        assert!(
+            text.contains(" a apply  ↑↓ scroll  esc back  ? help"),
+            "{text}"
+        );
+        app.act(Action::Bottom);
+        let text = screen(&app, 60, 12);
+        assert!(!text.contains("job-00"), "{text}");
+        assert!(text.contains("job-11"), "{text}");
+    }
+
+    #[test]
+    fn applying_is_a_question_named_after_the_action() {
+        let mut app = unsynced(every_change());
+        app.act(Action::Sync);
+        app.act(Action::Apply);
+        let text = screen(&app, 60, 12);
+        let bar = text.lines().last().unwrap();
+        assert_eq!(bar.trim_end(), " apply 2 changes?  y apply  n not now");
+        let mut app = unsynced(vec![pend("report", Ok(sync::Action::Add))]);
+        app.act(Action::Sync);
+        app.act(Action::Apply);
+        let text = screen(&app, 60, 12);
+        assert!(text.contains(" apply 1 change?  y apply"), "{text}");
+    }
+
+    #[test]
+    fn what_was_applied_is_said_in_the_words_of_otto_sync() {
+        let mut app = unsynced(every_change());
+        app.act(Action::Sync);
+        app.columns = columns(78);
+        app.show_applied(vec![
+            pend("report", Ok(sync::Action::Add)),
+            pend("triage", Ok(sync::Action::Update)),
+            pend("nightly", Err("the scheduler refused nightly")),
+            pend("old", Ok(sync::Action::Remove)),
+        ]);
+        let text = screen(&app, 78, 20);
+        let rows: Vec<&str> = text.lines().collect();
+        assert!(rows[2].trim_end().ends_with(" added"), "{text}");
+        assert!(rows[3].trim_end().ends_with(" updated"), "{text}");
+        assert!(rows[4].trim_end().ends_with(" error"), "{text}");
+        assert_eq!(rows[5].trim_end(), " │ the scheduler refused nightly");
+        assert!(rows[6].trim_end().ends_with(" removed"), "{text}");
+        assert!(rows[18].starts_with(" 3 applied, 1 not"), "{text}");
+        // There is nothing left to ask on this screen.
+        assert_eq!(rows[19].trim_end(), " esc back  ? help");
+    }
+
+    #[test]
+    fn the_help_still_fits_with_the_sync_in_it() {
+        let mut app = unsynced(Vec::new());
+        app.act(Action::Help);
+        let text = screen(&app, 60, 12);
+        assert!(text.contains(" S     review and apply the sync"), "{text}");
+        for row in text.lines() {
+            assert!(width_in_columns(row.trim_end()) < 60, "{row}");
+        }
     }
 }

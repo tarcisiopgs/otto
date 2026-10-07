@@ -60,6 +60,8 @@ pub fn action(key: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('n') => Action::New,
         KeyCode::Char('E') => Action::EditJob,
         KeyCode::Char('d') => Action::Delete,
+        KeyCode::Char('S') => Action::Sync,
+        KeyCode::Char('a') => Action::Apply,
         _ => return None,
     })
 }
@@ -317,5 +319,14 @@ mod tests {
             KeyEventState::NONE,
         );
         assert_eq!(action(release, &running()), None);
+    }
+
+    #[test]
+    fn the_sync_has_a_key_to_review_and_one_to_apply() {
+        let app = running();
+        assert_eq!(action(press(KeyCode::Char('S')), &app), Some(Action::Sync));
+        assert_eq!(action(press(KeyCode::Char('a')), &app), Some(Action::Apply));
+        // The lowercase one is still the skip.
+        assert_eq!(action(press(KeyCode::Char('s')), &app), Some(Action::Skip));
     }
 }

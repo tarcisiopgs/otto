@@ -5,9 +5,10 @@ use std::path::PathBuf;
 
 use crate::jobs_file::JobSpec;
 use crate::store::{Outcome, Run, State};
+use crate::sync;
 use crate::tui::form::{Edit, Form};
-use crate::tui::text::rows;
-use crate::tui::world::{JobView, Log, Snapshot};
+use crate::tui::text::{cut, rows, wrapped};
+use crate::tui::world::{JobView, Log, Pending, Snapshot};
 
 /// The rows a job takes on the list: two lines and the rule that closes it.
 pub const ENTRY: usize = 3;
@@ -23,6 +24,8 @@ pub enum Screen {
     Help,
     /// The form that creates or edits a job; what it holds is in `App::form`.
     Form,
+    /// What a sync would do, and after it was applied what it did.
+    Sync,
 }
 
 /// What the user asked for, whichever key it was.
@@ -58,6 +61,10 @@ pub enum Action {
     Toggle,
     /// A keystroke of editing, for the field in focus.
     Input(Edit),
+    /// What a sync would do.
+    Sync,
+    /// Do it.
+    Apply,
 }
 
 /// Something to do outside the UI's own state.
@@ -98,6 +105,8 @@ pub enum Effect {
     Delete {
         job: String,
     },
+    /// Make the scheduler match the jobs file.
+    Apply,
 }
 
 /// A question the UI is waiting on before it acts.
@@ -112,6 +121,10 @@ pub enum Confirm {
     },
     /// Leave the form and lose what was typed.
     Discard,
+    /// Hand the scheduler this many changes.
+    Apply {
+        changes: usize,
+    },
 }
 
 /// One line told to the user: what could not be done, or what happened.
@@ -148,6 +161,10 @@ pub struct App {
     /// changes: a notice goes with the next key, and the next key is the one
     /// that takes the user to the field.
     pub reason: Option<String>,
+    /// What the last sync did with each job, while the sync screen shows it.
+    applied: Option<Vec<Pending>>,
+    /// The first row shown of a sync screen that does not fit.
+    sync_top: usize,
     /// Where `Back` leaves the help screen.
     behind_help: Screen,
     /// Where closing the form goes back to.
@@ -175,6 +192,8 @@ impl App {
             form: None,
             warnings: Vec::new(),
             reason: None,
+            applied: None,
+            sync_top: 0,
             behind_help: Screen::Jobs,
             behind_form: Screen::Jobs,
             log_is_partial: false,
@@ -218,10 +237,17 @@ impl App {
                 view.name == *job && view.running().is_some_and(|run| run.pid == Some(*pid))
             }),
             Some(Confirm::Delete { job }) => listed(job),
-            Some(Confirm::Discard) | None => true,
+            Some(Confirm::Discard | Confirm::Apply { .. }) | None => true,
         };
         if !answerable {
             self.confirm = None;
+        }
+        // The question counts what would be applied now, and goes with it.
+        if let Some(Confirm::Apply { .. }) = self.confirm {
+            self.confirm = match self.applicable() {
+                0 => None,
+                changes => Some(Confirm::Apply { changes }),
+            };
         }
         // The same for the form of a job that is no longer in the file: what
         // it would save over is gone.
@@ -235,6 +261,12 @@ impl App {
             self.confirm = None;
             self.screen = Screen::Jobs;
             self.say(format!("{job} is no longer in the jobs file"));
+        }
+        // Something else did the sync: there is nothing left to preview.
+        if self.screen == Screen::Sync && self.applied.is_none() && self.snapshot.pending.is_empty()
+        {
+            self.leave_sync();
+            self.say("nothing left to apply".to_owned());
         }
         let jobs = &self.snapshot.jobs;
         if self.selected().is_none() {
@@ -271,6 +303,7 @@ impl App {
                     match confirm {
                         Confirm::Stop { job, pid } => vec![Effect::Stop { job, pid }],
                         Confirm::Delete { job } => vec![Effect::Delete { job }],
+                        Confirm::Apply { .. } => vec![Effect::Apply],
                         Confirm::Discard => {
                             self.close_form();
                             Vec::new()
@@ -309,6 +342,10 @@ impl App {
                 return vec![Effect::OpenForm { job: None }];
             }
             Action::EditJob | Action::Delete => return self.manage(action),
+            Action::Sync if self.screen == Screen::Jobs => self.preview(),
+            Action::Apply if self.screen == Screen::Sync => self.ask_to_apply(),
+            // Each of the two has one screen it means something on.
+            Action::Sync | Action::Apply => {}
             // The keys of the form mean nothing anywhere else.
             Action::New
             | Action::Save
@@ -356,13 +393,119 @@ impl App {
         self.screen = Screen::Jobs;
         self.job = Some(job.to_owned());
         self.run = None;
-        // The list shows the job with a next run, and it has no unit yet.
-        self.say(format!("{job} saved; otto sync schedules it"));
+        // That it is not scheduled yet is on its entry, with the way there.
+        self.say(format!("{job} saved"));
     }
 
     /// The job was taken out of the jobs file.
     pub fn deleted(&mut self, job: &str) {
-        self.say(format!("{job} deleted; otto sync removes its unit"));
+        self.say(format!("{job} deleted"));
+    }
+
+    /// What the sync screen lists: what the sync did, once it was applied,
+    /// and until then what it would do.
+    pub fn changes(&self) -> &[Pending] {
+        self.applied.as_deref().unwrap_or(&self.snapshot.pending)
+    }
+
+    /// Whether the sync screen shows a sync that was applied.
+    pub fn applied(&self) -> bool {
+        self.applied.is_some()
+    }
+
+    /// How many of the pending changes a sync would make now: not the ones
+    /// that wait for a run to end, and not the ones it cannot make.
+    pub fn applicable(&self) -> usize {
+        use sync::Action::{Add, Remove, Update};
+        self.snapshot
+            .pending
+            .iter()
+            .filter(|pending| matches!(pending.change, Ok(Add | Update | Remove)))
+            .count()
+    }
+
+    /// The sync was applied: the screen now says what it did with each job.
+    pub fn show_applied(&mut self, done: Vec<Pending>) {
+        // Nothing to show is a sync that had nothing to do by the time it
+        // ran, or a jobs file that stopped being readable.
+        if done.is_empty() {
+            self.leave_sync();
+            self.say("nothing was applied".to_owned());
+            return;
+        }
+        self.applied = Some(done);
+        self.sync_top = 0;
+        self.screen = Screen::Sync;
+    }
+
+    /// Why a change cannot be made, as the rows the sync screen gives it: two
+    /// at most, the second cut where it has to be.
+    pub fn reason_rows(&self, reason: &str) -> Vec<String> {
+        let said = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut rows = wrapped(&said, self.columns);
+        if rows.len() > 2 {
+            rows.truncate(2);
+            if let Some(end) = rows.last_mut() {
+                let kept = cut(end, self.columns.saturating_sub(1));
+                *end = format!("{}…", kept.trim_end_matches('…'));
+            }
+        }
+        rows
+    }
+
+    /// The rows the sync screen has to show: one for each job and those of
+    /// each reason.
+    pub fn sync_rows(&self) -> usize {
+        self.changes()
+            .iter()
+            .map(|pending| match &pending.change {
+                Ok(_) => 1,
+                Err(reason) => 1 + self.reason_rows(reason).len(),
+            })
+            .sum()
+    }
+
+    /// The first row the sync screen shows.
+    pub fn sync_top(&self) -> usize {
+        self.sync_top.min(self.last_sync_top())
+    }
+
+    fn last_sync_top(&self) -> usize {
+        self.sync_rows().saturating_sub(self.page)
+    }
+
+    fn preview(&mut self) {
+        if !self.snapshot.can_sync {
+            self.say("no scheduler on this system".to_owned());
+        } else if !self.snapshot.pending.is_empty() {
+            self.applied = None;
+            self.sync_top = 0;
+            self.screen = Screen::Sync;
+        } else if self.snapshot.error.is_some() {
+            self.say("fix the jobs file before syncing".to_owned());
+        } else {
+            self.say("nothing to apply".to_owned());
+        }
+    }
+
+    fn ask_to_apply(&mut self) {
+        // What is on screen was applied already: the next one starts from
+        // a new preview.
+        if self.applied.is_some() {
+            return;
+        }
+        match self.applicable() {
+            0 => self.say("nothing can be applied yet".to_owned()),
+            changes => self.confirm = Some(Confirm::Apply { changes }),
+        }
+    }
+
+    fn leave_sync(&mut self) {
+        self.applied = None;
+        self.sync_top = 0;
+        if self.screen == Screen::Sync {
+            self.screen = Screen::Jobs;
+        }
     }
 
     /// The form could not be written. It stays, with the reason, unless the
@@ -627,6 +770,10 @@ impl App {
                 // Reaching the end by scrolling down is asking to follow again.
                 self.follow = by > 0 && top == last;
             }
+            Screen::Sync => {
+                let top = self.sync_top().saturating_add_signed(by);
+                self.sync_top = top.min(self.last_sync_top());
+            }
             Screen::Help | Screen::Form => {}
         }
     }
@@ -650,7 +797,7 @@ impl App {
                     self.screen = Screen::Log;
                 }
             },
-            Screen::Log | Screen::Help | Screen::Form => {}
+            Screen::Log | Screen::Help | Screen::Form | Screen::Sync => {}
         }
     }
 
@@ -664,6 +811,7 @@ impl App {
             }
             Screen::Help => self.screen = self.behind_help,
             Screen::Form => self.close_form(),
+            Screen::Sync => self.leave_sync(),
         }
     }
 
@@ -738,6 +886,7 @@ mod tests {
     use crate::config::{Job, Schedule, Weekday};
     use crate::store::{Outcome, Run, Trigger};
     use crate::tui::form::{Edit, Focus};
+    use crate::tui::world::Pending;
 
     fn job(name: &str) -> JobView {
         JobView {
@@ -1116,7 +1265,7 @@ mod tests {
         assert!(app.form.is_none());
         assert_eq!(app.job.as_deref(), Some("nightly"));
         // The list would show it with a next run: it is not scheduled yet.
-        assert_eq!(text(&app), "nightly saved; otto sync schedules it");
+        assert_eq!(text(&app), "nightly saved");
         assert!(!app.notice.unwrap().error);
     }
 
@@ -1124,7 +1273,7 @@ mod tests {
     fn a_deleted_job_still_has_its_unit_until_the_sync() {
         let mut app = App::new(three());
         app.deleted("alpha");
-        assert_eq!(text(&app), "alpha deleted; otto sync removes its unit");
+        assert_eq!(text(&app), "alpha deleted");
     }
 
     #[test]
@@ -1616,5 +1765,230 @@ mod tests {
         assert_eq!(app.screen, Screen::Job);
         assert_eq!(app.log, None);
         assert_eq!(text(&app), "no output for run r1 of alpha");
+    }
+
+    fn pend(job: &str, change: Result<sync::Action, &str>) -> Pending {
+        Pending {
+            job: job.to_owned(),
+            change: change.map_err(str::to_owned),
+        }
+    }
+
+    /// The three jobs, with this still to apply.
+    fn unsynced(pending: Vec<Pending>) -> Snapshot {
+        Snapshot {
+            pending,
+            can_sync: true,
+            ..three()
+        }
+    }
+
+    /// One change that can be applied, one that waits and one that cannot.
+    fn mixed() -> Vec<Pending> {
+        vec![
+            pend("alpha", Ok(sync::Action::Add)),
+            pend("beta", Err("prompt file not found: /prompts/beta.md")),
+            pend("gamma", Ok(sync::Action::Busy)),
+        ]
+    }
+
+    fn previewing(pending: Vec<Pending>) -> App {
+        let mut app = App::new(unsynced(pending));
+        assert_eq!(app.act(Action::Sync), []);
+        assert_eq!(app.screen, Screen::Sync);
+        app
+    }
+
+    #[test]
+    fn sync_opens_the_preview_of_what_is_pending() {
+        let app = previewing(mixed());
+        assert_eq!(app.changes(), mixed());
+        assert_eq!(app.notice, None);
+    }
+
+    #[test]
+    fn sync_with_nothing_pending_says_so() {
+        let mut app = App::new(unsynced(Vec::new()));
+        assert_eq!(app.act(Action::Sync), []);
+        assert_eq!(app.screen, Screen::Jobs);
+        assert_eq!(text(&app), "nothing to apply");
+    }
+
+    #[test]
+    fn sync_without_a_scheduler_says_so() {
+        let mut app = App::new(three());
+        app.act(Action::Sync);
+        assert_eq!(app.screen, Screen::Jobs);
+        assert_eq!(text(&app), "no scheduler on this system");
+    }
+
+    #[test]
+    fn a_jobs_file_that_cannot_be_read_is_not_synced() {
+        let mut app = App::new(Snapshot {
+            error: Some("jobs.toml: invalid".to_owned()),
+            ..unsynced(Vec::new())
+        });
+        app.act(Action::Sync);
+        assert_eq!(app.screen, Screen::Jobs);
+        assert_eq!(text(&app), "fix the jobs file before syncing");
+    }
+
+    #[test]
+    fn the_preview_opens_from_the_list_only() {
+        let mut app = App::new(unsynced(mixed()));
+        app.act(Action::Open);
+        app.act(Action::Sync);
+        assert_eq!(app.screen, Screen::Job);
+    }
+
+    #[test]
+    fn apply_asks_first_and_counts_what_would_change() {
+        let mut app = previewing(mixed());
+        assert_eq!(app.act(Action::Apply), []);
+        // The one that waits and the one that cannot are not counted.
+        assert_eq!(app.confirm, Some(Confirm::Apply { changes: 1 }));
+        assert_eq!(app.act(Action::No), []);
+        assert_eq!(app.confirm, None);
+        app.act(Action::Apply);
+        assert_eq!(app.act(Action::Yes), [Effect::Apply]);
+        assert_eq!(app.confirm, None);
+    }
+
+    #[test]
+    fn with_nothing_that_can_be_applied_there_is_no_question() {
+        let mut app = previewing(vec![
+            pend("beta", Err("workdir not found")),
+            pend("gamma", Ok(sync::Action::Busy)),
+        ]);
+        assert_eq!(app.act(Action::Apply), []);
+        assert_eq!(app.confirm, None);
+        assert_eq!(text(&app), "nothing can be applied yet");
+    }
+
+    #[test]
+    fn apply_means_nothing_off_the_preview() {
+        let mut app = App::new(unsynced(mixed()));
+        assert_eq!(app.act(Action::Apply), []);
+        assert_eq!(app.confirm, None);
+    }
+
+    #[test]
+    fn the_keys_of_a_job_do_nothing_on_the_preview() {
+        let mut app = previewing(mixed());
+        for action in [
+            Action::RunNow,
+            Action::Pause,
+            Action::Skip,
+            Action::EditPrompt,
+            Action::New,
+            Action::EditJob,
+            Action::Delete,
+            Action::Open,
+        ] {
+            assert_eq!(app.act(action), [], "{action:?}");
+            assert_eq!(app.screen, Screen::Sync);
+            assert_eq!(app.confirm, None);
+        }
+    }
+
+    #[test]
+    fn what_was_applied_stays_until_the_screen_is_left() {
+        let mut app = previewing(mixed());
+        let done = vec![
+            pend("alpha", Ok(sync::Action::Add)),
+            pend("beta", Err("prompt file not found: /prompts/beta.md")),
+        ];
+        app.show_applied(done.clone());
+        // The next look finds less to do; the screen still says what was done.
+        app.refresh(unsynced(vec![pend("beta", Err("prompt file not found"))]));
+        assert_eq!(app.screen, Screen::Sync);
+        assert_eq!(app.changes(), done);
+        assert!(app.applied());
+        // It was applied: asking again is for the next preview.
+        assert_eq!(app.act(Action::Apply), []);
+        assert_eq!(app.confirm, None);
+        app.act(Action::Back);
+        assert_eq!(app.screen, Screen::Jobs);
+        assert!(!app.applied());
+        app.act(Action::Sync);
+        assert_eq!(app.changes().len(), 1);
+    }
+
+    #[test]
+    fn an_apply_that_did_nothing_goes_back_and_says_so() {
+        let mut app = previewing(mixed());
+        app.show_applied(Vec::new());
+        assert_eq!(app.screen, Screen::Jobs);
+        assert_eq!(text(&app), "nothing was applied");
+    }
+
+    #[test]
+    fn the_preview_closes_when_nothing_is_left_to_apply() {
+        let mut app = previewing(mixed());
+        app.refresh(unsynced(Vec::new()));
+        assert_eq!(app.screen, Screen::Jobs);
+        assert_eq!(text(&app), "nothing left to apply");
+    }
+
+    #[test]
+    fn the_question_goes_when_nothing_could_be_applied_any_more() {
+        let mut app = previewing(mixed());
+        app.act(Action::Apply);
+        app.refresh(unsynced(vec![pend("beta", Err("workdir not found"))]));
+        assert_eq!(app.confirm, None);
+        assert_eq!(app.screen, Screen::Sync);
+        // And it keeps its count right while there is something.
+        let mut app = previewing(mixed());
+        app.act(Action::Apply);
+        app.refresh(unsynced(vec![
+            pend("alpha", Ok(sync::Action::Add)),
+            pend("old", Ok(sync::Action::Remove)),
+        ]));
+        assert_eq!(app.confirm, Some(Confirm::Apply { changes: 2 }));
+    }
+
+    #[test]
+    fn the_help_goes_back_to_the_preview() {
+        let mut app = previewing(mixed());
+        app.act(Action::Help);
+        app.refresh(unsynced(mixed()));
+        app.act(Action::Back);
+        assert_eq!(app.screen, Screen::Sync);
+    }
+
+    #[test]
+    fn a_long_preview_scrolls_and_stops_at_its_end() {
+        let many: Vec<Pending> = (0..10)
+            .map(|n| pend(&format!("job-{n}"), Ok(sync::Action::Add)))
+            .collect();
+        let mut app = previewing(many);
+        app.page = 4;
+        assert_eq!(app.sync_top(), 0);
+        app.act(Action::Down);
+        assert_eq!(app.sync_top(), 1);
+        app.act(Action::Bottom);
+        assert_eq!(app.sync_top(), 6);
+        app.act(Action::Down);
+        assert_eq!(app.sync_top(), 6);
+        app.act(Action::Top);
+        assert_eq!(app.sync_top(), 0);
+    }
+
+    #[test]
+    fn a_reason_takes_its_own_rows_and_never_more_than_two() {
+        let mut app = previewing(vec![pend(
+            "beta",
+            Err("one two three four five six seven eight nine ten eleven twelve"),
+        )]);
+        app.columns = 24;
+        assert_eq!(
+            app.reason_rows("prompt file not found"),
+            ["prompt file not found"]
+        );
+        let rows = app.reason_rows("one two three four five six seven eight nine ten eleven");
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].ends_with('…'), "{rows:?}");
+        // One row for the job and two for why.
+        assert_eq!(app.sync_rows(), 3);
     }
 }

@@ -329,6 +329,9 @@ fn screen(config_path: &Path) -> Result<ExitCode> {
         editor,
         zone: zone.clone(),
         path: env::var_os("PATH"),
+        // Where otto has no scheduler, or the `PATH` is empty, the screen
+        // still opens: it only has nothing to sync with.
+        sync: scheduler::native().ok().zip(context(config_path).ok()),
     });
     tui::run(&mut world, &Timestamp::now, &zone)?;
     Ok(ExitCode::SUCCESS)
