@@ -241,7 +241,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 notify: job.notify,
                 zone: &zone,
             };
-            let notifier = notify::native(&System);
+            let patient = notify::Timed {
+                limit: notify::PATIENCE,
+            };
+            let notifier = notify::native(&patient);
             let code = run::execute(
                 &request,
                 &store()?,

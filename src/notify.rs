@@ -1,11 +1,16 @@
 //! Telling the user about a run: which runs a job tells of, and in what
 //! words.
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use jiff::Zoned;
 use serde::Deserialize;
 
-use crate::scheduler::runner::{Runner, must};
+use std::io::Read as _;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::scheduler::runner::{Output, Runner};
 use crate::store::{Trigger, duration_label};
 
 /// How much a job tells of its runs.
@@ -123,6 +128,16 @@ pub fn message(job: &str, event: &Event) -> Message {
     }
 }
 
+/// Runs the command of a notification. One that fails is told by what it
+/// said, not by the command, which is long and nobody's to read.
+fn ask(runner: &dyn Runner, program: &str, args: &[&str]) -> Result<()> {
+    let output = runner.run(program, args)?;
+    if !output.success {
+        bail!("{program} failed: {}", output.stderr.trim());
+    }
+    Ok(())
+}
+
 /// Shows a message to the user.
 pub trait Notifier {
     fn notify(&self, message: &Message) -> Result<()>;
@@ -147,7 +162,7 @@ impl Notifier for Macos<'_> {
     fn notify(&self, message: &Message) -> Result<()> {
         // The words are arguments of the script, never part of its text:
         // nothing in a job name or a reason is read as AppleScript.
-        must(
+        ask(
             self.runner,
             "osascript",
             &[
@@ -157,6 +172,7 @@ impl Notifier for Macos<'_> {
                 "display notification (item 2 of argv) with title (item 1 of argv)",
                 "-e",
                 "end run",
+                "--",
                 &message.title,
                 &message.body,
             ],
@@ -167,7 +183,7 @@ impl Notifier for Macos<'_> {
 impl Notifier for Linux<'_> {
     fn notify(&self, message: &Message) -> Result<()> {
         // After `--` nothing is an option, whatever it starts with.
-        must(
+        ask(
             self.runner,
             "notify-send",
             &["--app-name=otto", "--", &message.title, &message.body],
@@ -185,9 +201,19 @@ $text.Item(1).AppendChild($xml.CreateTextNode({body})) | Out-Null
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe').Show($toast)";
 
-/// `text` as a PowerShell string that nothing is expanded in.
+/// `text` as a PowerShell string that nothing is expanded in. PowerShell
+/// ends such a string at a curly quote as it does at a straight one, so each
+/// of them is doubled.
 fn quoted(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "''"))
+    let mut out = String::from("'");
+    for c in text.chars() {
+        out.push(c);
+        if matches!(c, '\'' | '\u{2018}'..='\u{201b}') {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 impl Notifier for Windows<'_> {
@@ -197,12 +223,14 @@ impl Notifier for Windows<'_> {
             .replace("{body}", &quoted(&message.body));
         // Encoded, so that no quoting stands between otto and PowerShell.
         let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        must(
+        ask(
             self.runner,
             "powershell",
             &[
                 "-NoProfile",
                 "-NonInteractive",
+                "-OutputFormat",
+                "Text",
                 "-EncodedCommand",
                 &base64(&bytes),
             ],
@@ -232,6 +260,52 @@ fn base64(bytes: &[u8]) -> String {
     text
 }
 
+/// How long otto waits for a notification command.
+pub const PATIENCE: Duration = Duration::from_secs(5);
+
+/// Runs a notification command and gives up on one that does not return: a
+/// dialog nobody answers, a desktop that is not there. No notification is
+/// worth a run that waits on it.
+pub struct Timed {
+    pub limit: Duration,
+}
+
+impl Runner for Timed {
+    fn run(&self, program: &str, args: &[&str]) -> Result<Output> {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("cannot start {program}"))?;
+        let asked = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if asked.elapsed() > self.limit {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!(
+                    "{program} took longer than {}s",
+                    self.limit.as_secs_f32().ceil()
+                );
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let mut stderr = String::new();
+        if let Some(mut said) = child.stderr.take() {
+            let _ = said.read_to_string(&mut stderr);
+        }
+        Ok(Output {
+            success: status.success(),
+            stdout: String::new(),
+            stderr,
+        })
+    }
+}
+
 /// A system otto has no way to notify on.
 struct Nowhere;
 
@@ -256,6 +330,7 @@ pub fn native(runner: &dyn Runner) -> Box<dyn Notifier + '_> {
 
 /// Keeps what it is asked to show, and can be made to fail.
 #[cfg(test)]
+#[cfg(unix)]
 #[derive(Default)]
 pub struct Recording {
     pub told: std::cell::RefCell<Vec<Message>>,
@@ -263,6 +338,7 @@ pub struct Recording {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 impl Notifier for Recording {
     fn notify(&self, message: &Message) -> Result<()> {
         if let Some(reason) = &self.broken {
@@ -276,7 +352,6 @@ impl Notifier for Recording {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::runner::Output;
 
     fn at() -> Zoned {
         "2026-10-07T07:00:00-03:00[America/Recife]".parse().unwrap()
@@ -444,7 +519,7 @@ mod tests {
     fn awkward() -> Message {
         Message {
             title: "-job \"it's\" failed".to_owned(),
-            body: "exit 3, `x` \\ $HOME\nsecond".to_owned(),
+            body: "exit 3, `x` \\ $HOME\nsecond ’quoted‘".to_owned(),
         }
     }
 
@@ -460,6 +535,8 @@ mod tests {
         Macos { runner: &commands }.notify(&awkward()).unwrap();
         let command = only(&commands);
         assert_eq!(command[0], "osascript");
+        // After `--`, so a title is never read as an option of osascript.
+        assert_eq!(command[command.len() - 3], "--");
         assert_eq!(command[command.len() - 2], awkward().title);
         assert_eq!(command[command.len() - 1], awkward().body);
         // Nothing of the message is in the text of the script.
@@ -513,15 +590,17 @@ mod tests {
         Windows { runner: &commands }.notify(&awkward()).unwrap();
         let command = only(&commands);
         assert_eq!(
-            command[..4],
+            command[..6],
             [
                 "powershell",
                 "-NoProfile",
                 "-NonInteractive",
+                "-OutputFormat",
+                "Text",
                 "-EncodedCommand"
             ]
         );
-        let units: Vec<u16> = decoded(&command[4])
+        let units: Vec<u16> = decoded(&command[6])
             .chunks(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
@@ -531,7 +610,8 @@ mod tests {
             "{script}"
         );
         assert!(
-            script.contains("CreateTextNode('exit 3, `x` \\ $HOME\nsecond')"),
+            // A curly quote ends a PowerShell string as a straight one does.
+            script.contains("CreateTextNode('exit 3, `x` \\ $HOME\nsecond ’’quoted‘‘')"),
             "{script}"
         );
         assert!(script.ends_with(".Show($toast)"), "{script}");
@@ -565,5 +645,58 @@ mod tests {
         let said = format!("{error:#}");
         assert!(said.contains("osascript"), "{said}");
         assert!(said.contains("not allowed"), "{said}");
+        // The command is not the user's to read: only what it said.
+        assert!(!said.contains("display notification"), "{said}");
+        assert!(!said.contains("it's"), "{said}");
+    }
+}
+
+// These tests start `sh` in the place of the notification command.
+#[cfg(test)]
+#[cfg(unix)]
+mod unix_tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[test]
+    fn a_command_that_does_not_return_is_given_up_on() {
+        let timed = Timed {
+            limit: Duration::from_millis(200),
+        };
+        let asked = Instant::now();
+        let error = timed.run("sh", &["-c", "sleep 5"]).unwrap_err();
+        assert!(asked.elapsed() < Duration::from_secs(3));
+        assert!(
+            format!("{error:#}").contains("sh took longer than"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_command_that_returns_says_how_it_went() {
+        let timed = Timed { limit: PATIENCE };
+        let output = timed.run("sh", &["-c", "echo no >&2; exit 3"]).unwrap();
+        assert!(!output.success);
+        assert_eq!(output.stderr.trim(), "no");
+        assert!(timed.run("sh", &["-c", "true"]).unwrap().success);
+    }
+
+    #[test]
+    fn a_command_that_is_not_there_is_named() {
+        let timed = Timed { limit: PATIENCE };
+        let error = timed.run("otto-no-such-notifier", &[]).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cannot start otto-no-such-notifier"),
+            "{error:#}"
+        );
+        // And through a backend it is still only an error.
+        let error = Linux { runner: &timed }
+            .notify(&Message {
+                title: "report failed".to_owned(),
+                body: "exit 3".to_owned(),
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("cannot start notify-send"));
     }
 }

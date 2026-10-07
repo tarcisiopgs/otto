@@ -62,7 +62,13 @@ do {
 Write-Host "> otto runs demo`n$runs"
 schtasks /Query /TN 'otto\demo' /V /FO LIST | Select-String 'Last Run|Last Result|Status'
 Expect $runs 'scheduled\s+ok'
-Expect (Otto log demo) 'fake agent got 2 arguments'
+$log = Otto log demo
+Expect $log 'fake agent got 2 arguments'
+# The toast may have nowhere to show, but the script that asks for it must be
+# one PowerShell can read.
+if ($log -match 'ParserError|Unexpected token|is not recognized') {
+    throw "the notification script is not valid PowerShell:`n$log"
+}
 Expect (Otto list) 'demo.*active\s+ok'
 
 (Get-Content $config) -replace '03:00', '04:30' | Set-Content $config

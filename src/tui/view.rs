@@ -24,7 +24,7 @@ pub const MIN: (u16, u16) = (60, 12);
 /// How many of a job's latest runs its strip of marks shows.
 const STRIP: usize = 8;
 
-/// The rows of the job screen above its runs: the entry, three facts, a rule.
+/// The rows of the job screen above its runs: the entry, four facts, a rule.
 const SHEET: usize = 7;
 
 /// The columns kept for how the last run ended, so that the strips of every
@@ -410,10 +410,17 @@ fn first_line<'a>(job: &'a JobView, chosen: bool, marker: bool, width: usize) ->
 }
 
 /// The rows the job screen spends above its runs when `left` are free: the
-/// whole sheet, or only the entry and the rule when the runs would be left
-/// with too few.
+/// whole sheet; a row short of it, the sheet without how the job tells of
+/// its runs; and only the entry and the rule when the runs would be left with
+/// too few.
 fn sheet(left: usize) -> usize {
-    if left >= SHEET + RUNS { SHEET } else { ENTRY }
+    if left >= SHEET + RUNS {
+        SHEET
+    } else if left >= SHEET - 1 + RUNS {
+        SHEET - 1
+    } else {
+        ENTRY
+    }
 }
 
 /// The first of the rows to draw so that row `selected` is among `visible`.
@@ -535,7 +542,8 @@ fn job<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a>
     let pending = app.snapshot.pending_for(&job.name);
     lines.push(second_line(job, pending, now, width));
     // On a short terminal the facts give way to the runs.
-    if sheet(rows.saturating_sub(lines.len() - 2)) == SHEET {
+    let spent = sheet(rows.saturating_sub(lines.len() - 2));
+    if spent > ENTRY {
         lines.push(fact(
             "workdir",
             tail(&job.job.workdir.display().to_string(), room),
@@ -545,6 +553,8 @@ fn job<'a>(app: &'a App, now: &Zoned, width: usize, rows: usize) -> Vec<Line<'a>
             tail(&job.job.prompt.display().to_string(), room),
         ));
         lines.push(fact("args", cut(&args, room)));
+    }
+    if spent == SHEET {
         lines.push(fact("notify", job.job.notify.label().to_owned()));
     }
     lines.push(rule(width));
@@ -816,6 +826,8 @@ fn fields(form: &Form, width: usize) -> (Vec<Line<'_>>, (usize, usize)) {
         }
         lines.push(Line::from(spans));
     }
+    // On the smallest terminal the fields take every row, and this rule is
+    // cut off by the height of the body.
     lines.push(rule(width));
     (lines, cursor)
 }
@@ -837,7 +849,7 @@ fn hint(form: &Form) -> Option<&'static str> {
         Focus::Notify => Some(match form.notify {
             Level::Off => "never tells",
             Level::Failures => "tells when a run fails",
-            Level::Finish => "tells when a run ends, well or not",
+            Level::Finish => "tells when a run ends, ok or failed",
             Level::All => "tells when a run starts, ends or does not happen",
         }),
     }
@@ -925,7 +937,9 @@ fn notice(app: &App, width: usize) -> Line<'_> {
         }
         let note = || format!("note: {}", app.warnings.join("; "));
         let text = match (form.focus, hint(form)) {
-            (Focus::Args, Some(hint)) => hint.to_owned(),
+            // Never out of sight on these two: what the arguments are for,
+            // and what the level under the cursor does.
+            (Focus::Args | Focus::Notify, Some(hint)) => hint.to_owned(),
             _ if !app.warnings.is_empty() => note(),
             (_, Some(hint)) => hint.to_owned(),
             (_, None) => return Line::default(),
@@ -2466,7 +2480,7 @@ mod tests {
         let said = [
             (Level::Off, " never tells"),
             (Level::Failures, " tells when a run fails"),
-            (Level::Finish, " tells when a run ends, well or not"),
+            (Level::Finish, " tells when a run ends, ok or failed"),
             (
                 Level::All,
                 " tells when a run starts, ends or does not happen",
@@ -2507,7 +2521,7 @@ mod tests {
     }
 
     #[test]
-    fn a_job_that_only_tells_differently_is_applied() {
+    fn the_job_screen_says_how_the_job_tells() {
         let louder = JobView {
             job: Job {
                 notify: Level::All,
@@ -2515,12 +2529,35 @@ mod tests {
             },
             ..job("report")
         };
-        let mut app = unsynced(Vec::new());
-        app.snapshot.jobs = vec![louder];
-        let text = screen(&app, 78, 20);
-        assert!(!text.contains("not applied"), "{text}");
+        let mut app = app(vec![louder]);
         app.act(Action::Open);
         let text = screen(&app, 78, 20);
         assert!(text.contains(" │ notify   all"), "{text}");
+    }
+
+    #[test]
+    fn how_a_job_tells_is_the_first_fact_to_give_way() {
+        let app = on_the_job();
+        // A row short of the whole sheet: what the screen showed before the
+        // job had this fact.
+        let short = screen(&app, 60, 13);
+        assert!(short.contains(" │ args"), "{short}");
+        assert!(!short.contains(" │ notify"), "{short}");
+        assert!(short.contains("▸ ✓"), "{short}");
+        let enough = screen(&app, 60, 14);
+        assert!(enough.contains(" │ args"), "{enough}");
+        assert!(enough.contains(" │ notify"), "{enough}");
+    }
+
+    #[test]
+    fn what_a_level_does_is_said_whatever_else_there_is_to_say() {
+        let mut app = creating("nightly");
+        app.warnings = vec!["codex not found in PATH".to_owned()];
+        let text = screen(&app, 78, 20);
+        assert!(text.contains(" note: codex not found in PATH"), "{text}");
+        app.form.as_mut().unwrap().focus = Focus::Notify;
+        let text = screen(&app, 78, 20);
+        assert!(text.contains(" tells when a run fails"), "{text}");
+        assert!(!text.contains("note:"), "{text}");
     }
 }

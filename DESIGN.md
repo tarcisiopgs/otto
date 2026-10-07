@@ -70,6 +70,7 @@ There is no typeface: the terminal's font is the user's. Type is case and weight
 | start of a run | `2026-10-06 18:14` |
 | clock | `tue 6 oct  18:14` (two spaces before the time) |
 | place in a long list | ` · 3 of 12` |
+| what a job tells of | `off`, `failures`, `finish`, `all` |
 
 Time of day is always 24-hour `HH:MM`, on the clock of the terminal.
 
@@ -89,7 +90,7 @@ One column of rows, top to bottom:
 - **Behind the rule:** the first line of an entry is its heading and sits at the margin. Everything else that belongs to the entry sits behind ` │ `: its second line, its facts, the output of its run. Rows of a list of their own (the runs of a job) sit at the margin under the closing rule, with column 0 kept for `▸`.
 - **Narrow lines:** a line gives up content in a stated order and never wraps, except the error block (wrapped between words) and the output of a run (broken at width − 4 columns, never cut). Text cut at its end takes `…`; a path keeps its end and takes `…` at its start.
 - **Long lists:** the selection stays in view; the header says where it is (` · 3 of 12`) only when the list does not fit.
-- **Minimum:** 60 columns × 12 rows. Below it the screen draws only `terminal too small: otto needs 60 × 12`. At the minimum the body is eight rows: two entries, or the whole help.
+- **Minimum:** 60 columns × 12 rows. Below it the screen draws only `terminal too small: otto needs 60 × 12`. At the minimum the body is eight rows: two entries, the whole help, or the eight fields of the form.
 
 ## Elevation & Depth
 
@@ -120,7 +121,7 @@ On the form `✓` and `·` say the same of a choice: this one is taken, this one
 - **First line:** `▸ ` or two spaces; the name in 20 columns (BOLD when selected, cut with `…`); two spaces; the agent in 8 columns; the schedule. The state is right-aligned.
 - **Second line:** ` │ `, the coming run, the run strip, and how the last run ended, right-aligned.
 - **Rule:** ` ├───…`, DIM.
-- **Opened** (job screen): the same two lines without the marker, then the facts behind the rule (` │ ` and a DIM label in 9 columns: `workdir`, `prompt`, `args`, `notify`; `none` for no arguments, and for `notify` the level the job has), then the rule, then the runs. On a terminal too short to show three runs under them, the facts give way and the rule follows the second line.
+- **Opened** (job screen): the same two lines without the marker, then the facts behind the rule (` │ ` and a DIM label in 9 columns: `workdir`, `prompt`, `args`, `notify`; `none` for no arguments, and for `notify` the level the job has), then the rule, then the runs. On a terminal too short to show three runs under them, the facts give way and the rule follows the second line. One row short of that, `notify` gives way first.
 
 ### Run strip (signature)
 The latest eight runs as marks, one space apart, oldest to newest, so the newest is at the right. It is the same strip in three places: on the second line of every entry, as the first column of the run list on the job screen, and as the single mark in the header of the log.
@@ -213,15 +214,15 @@ Two columns that fit the eight body rows of the smallest terminal: the action ke
 | `n` `esc` `ctrl-c` | no | question |
 
 ### Job form
-One opened entry, with a fact to a field, in the order an entry reads: `name`, `agent`, `at`, `days`, then `workdir`, `prompt`, `args`, `notify` as on the job screen, then the rule. On the smallest terminal the eight fields take every row and the rule gives way to them. The header reads `new job` or `edit <name>`.
+One opened entry, with a fact to a field, in the order an entry reads: `name`, `agent`, `at`, `days`, then `workdir`, `prompt`, `args`, `notify` as on the job screen, then the rule. On the smallest terminal the eight fields take every row and the rule gives way to them. The form is then full: a ninth field needs a decision about what gives way next. The header reads `new job` or `edit <name>`.
 
 - **A field** is ` │ `, a DIM label in 9 columns, and the value in the default foreground from column 12. The field in focus is the selection: `▸` in column 0, in place of the space before the rule, and its label BOLD.
-- **The cursor** is the terminal's own, on the field in focus: where the next character goes, on the day `space` would mark, or on the agent that is chosen (`space` takes the next one). It is not shown while a question waits.
+- **The cursor** is the terminal's own, on the field in focus: where the next character goes, on the day `space` would mark, or on the agent or the level that is chosen (`space` takes the next one). It is not shown while a question waits.
 - **A choice** (`agent`, `days`, `notify`) lists every option: the chosen ones `✓name` with the name BOLD, the others `·name` DIM. No day chosen means every day, and the row says so in the list's word: it ends in a DIM `daily`.
 - **A text wider than its room** shows the part the cursor is in, with `…` at each end that was cut. The arguments are one to a line and are shown on one row, a DIM ` ⏎ ` between them. Arguments the field cannot hold (one with a line break, with a space at an end, or empty) are not shown as if it could: the row reads `written by hand in the jobs file`, DIM, and takes no typing.
 - **The levels of `notify`** go from less to more, `off` `failures` `finish` `all`: `←` and `→` stop at each end, and `space` takes the next one and goes round. A job that does not say has `failures`, which is not written to the file.
 - **The name of a job that exists** is DIM: it is shown, not offered.
-- **The notice row** says, in this order: why the job could not be saved, red, in the words of the jobs file, and it stays until the job changes while the focus goes to the field it names; on `args`, `a scheduled run has nobody to answer a permission prompt`, which is never out of sight there; what saving would run into, led by `note:` and never by `!`, since a note does not stop the save, and without the path the row above already shows (`note: workdir not found; codex not found in PATH`); and what the field in focus calls for (`24-hour time, as in 16:05`). On `notify` it is what the level that is chosen does: `never tells`, `tells when a run fails`, `tells when a run ends, well or not`, `tells when a run starts, ends or does not happen`.
+- **The notice row** says, in this order: why the job could not be saved, red, in the words of the jobs file, and it stays until the job changes while the focus goes to the field it names; on `args`, `a scheduled run has nobody to answer a permission prompt`, which is never out of sight there, and on `notify`, what the level that is chosen does; what saving would run into, led by `note:` and never by `!`, since a note does not stop the save, and without the path the row above already shows (`note: workdir not found; codex not found in PATH`); and what the field in focus calls for (`24-hour time, as in 16:05`). The four of `notify` are `never tells`, `tells when a run fails`, `tells when a run ends, ok or failed`, `tells when a run starts, ends or does not happen`.
 - **Every letter is text** on this screen. Its shortcut bar is `tab next`, the keys the field in focus takes besides text, and always `ctrl-s save` `esc cancel`. Text pasted into the terminal goes into the field as text: a line break in it is not `enter`.
 - **After a save or a delete** the list says what happened, in the default foreground: `nightly saved`. What is still to do is on the entry and in the reminder of the sync, below.
 - **Leaving a form that changed** is a question: `discard the changes?  y discard  n keep editing`. Deleting a job is one too: `delete <name>?  y delete  n keep`.

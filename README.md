@@ -176,7 +176,7 @@ A run that needs your attention shows a notification on the machine it ran on. H
 
 The notification names the job and what happened, `linear-updates failed`, and under it the exit code and how long the run took, or why it never started.
 
-otto uses what the system already has: `osascript` on macOS, `notify-send` on Linux, a PowerShell toast on Windows. On macOS the notification therefore comes in the name of Script Editor, and the first one may ask you to allow it. A notification that cannot be shown never changes a run: the reason is a line starting with `otto:` in the output of the run.
+otto uses what the system already has: `osascript` on macOS, `notify-send` on Linux, a PowerShell toast on Windows. On macOS the notification therefore comes in the name of Script Editor, and the first one may ask you to allow it. A notification that cannot be shown never changes a run: the reason is a line starting with `otto:` in the output of the run. otto waits five seconds for the system to take one and then goes on without it.
 
 Two things a notification does not know. A run that was interrupted, because the machine went down or the process was killed, tells nothing: no otto was left to tell. And an agent that exits with 0 without having done its job is an `ok` run, as it is everywhere else in otto.
 

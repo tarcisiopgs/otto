@@ -195,7 +195,6 @@ fn start(request: &Request, argv: &[String], log: &Path, started: &dyn Fn()) -> 
         .stderr(Stdio::piped())
         .spawn()
         .with_context(cannot_start)?;
-    started();
     let (done, drained) = mpsc::channel();
     let mut copies = 0;
     if let Some(stdout) = child.stdout.take() {
@@ -214,6 +213,9 @@ fn start(request: &Request, argv: &[String], log: &Path, started: &dyn Fn()) -> 
         });
         copies += 1;
     }
+    // Told with the output already being read: an agent nobody reads stops
+    // when the pipe is full, for as long as the notification takes.
+    started();
     let status = child.wait().with_context(cannot_start)?;
     // The agent is done. A process it left behind (a dev server, an MCP server)
     // can hold the pipe open for as long as it lives, so the copies get a
@@ -784,5 +786,42 @@ mod tests {
             .unwrap();
         world.run(Trigger::Manual, &sh("true")).unwrap_err();
         assert!(world.told().is_empty());
+    }
+
+    /// Told of a start, waits for the agent to have written all it has to.
+    struct Waiting {
+        done: PathBuf,
+        saw_it: std::cell::Cell<bool>,
+    }
+
+    impl Notifier for Waiting {
+        fn notify(&self, message: &Message) -> Result<()> {
+            if message.title.ends_with("started") {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while !self.done.exists() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                self.saw_it.set(self.done.exists());
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_manual_run_is_read_while_its_start_is_told() {
+        let world = World::telling(Level::All);
+        let waiting = Waiting {
+            done: world.workdir.join("done"),
+            saw_it: std::cell::Cell::new(false),
+        };
+        // More than a pipe holds: an agent nobody reads stops here.
+        let script = "head -c 300000 /dev/zero | tr '\\0' x; touch done";
+        world
+            .execute_with(&waiting, Trigger::Manual, &|| Ok(sh(script)), NOW)
+            .unwrap();
+        assert!(
+            waiting.saw_it.get(),
+            "the agent waited for the notification"
+        );
     }
 }
