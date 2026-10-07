@@ -1,5 +1,7 @@
 # otto
 
+![otto — scheduled runs for coding agents](assets/otto-banner.webp)
+
 **Scheduled runs for coding agents, on the scheduler your OS already has.**
 
 otto runs Claude Code or Codex on a schedule, without a session, a desktop app or a daemon of its own left open. You describe a job (which agent, which prompt, where and when) and otto hands it to the native scheduler: launchd on macOS, systemd timers on Linux. The agent runs on your machine, with your local tools, credentials and memory.
