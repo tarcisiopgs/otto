@@ -34,10 +34,6 @@ fn task_name(job_name: &str) -> String {
 }
 
 impl Scheduler for Windows {
-    fn name(&self) -> &'static str {
-        "Task Scheduler"
-    }
-
     fn units(&self, job_name: &str, job: &Job, ctx: &Context) -> Result<Vec<Unit>> {
         let (hour, minute) = job.schedule.time()?;
         let days: String = job

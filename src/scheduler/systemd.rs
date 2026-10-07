@@ -80,10 +80,6 @@ impl Scheduler for Systemd {
         must(runner, "systemctl", &["--user", "daemon-reload"])
     }
 
-    fn name(&self) -> &'static str {
-        "systemd"
-    }
-
     fn units(&self, job_name: &str, job: &Job, ctx: &Context) -> Result<Vec<Unit>> {
         let (hour, minute) = job.schedule.time()?;
         let days: Vec<&str> = job

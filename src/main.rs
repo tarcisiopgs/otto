@@ -50,8 +50,6 @@ struct Cli {
 enum Cmd {
     /// List the configured jobs.
     List,
-    /// Print what the OS scheduler would be given for a job, without installing it.
-    Plan { job: String },
     /// Make the OS scheduler match the jobs file: add, update and remove units.
     Sync {
         /// Print what would change without touching the scheduler.
@@ -158,20 +156,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     job.workdir.display(),
                     state.label(),
                     next_column(next.as_ref())
-                );
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        Cmd::Plan { job: name } => {
-            let job = config.job(&name)?;
-            let ctx = context(&path)?;
-            let scheduler = scheduler::native()?;
-            for unit in scheduler.units(&name, job, &ctx)? {
-                println!(
-                    "# {}: {}\n{}",
-                    scheduler.name(),
-                    unit.path.display(),
-                    unit.contents
                 );
             }
             Ok(ExitCode::SUCCESS)
