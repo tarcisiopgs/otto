@@ -814,8 +814,10 @@ mod tests {
             done: world.workdir.join("done"),
             saw_it: std::cell::Cell::new(false),
         };
-        // More than a pipe holds: an agent nobody reads stops here.
-        let script = "head -c 300000 /dev/zero | tr '\\0' x; touch done";
+        // A little more than a pipe holds: an agent nobody reads stops here.
+        // In lines, because a manual run also writes to the terminal of the
+        // test, and one line of that size chokes what collects the output.
+        let script = "head -c 70000 /dev/zero | tr '\\0' x | fold -w 100; touch done";
         world
             .execute_with(&waiting, Trigger::Manual, &|| Ok(sh(script)), NOW)
             .unwrap();
