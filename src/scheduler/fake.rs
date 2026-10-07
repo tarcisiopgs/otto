@@ -33,10 +33,6 @@ impl Fake {
 }
 
 impl Scheduler for Fake {
-    fn name(&self) -> &'static str {
-        "fake"
-    }
-
     fn units(&self, job_name: &str, job: &Job, ctx: &Context) -> Result<Vec<Unit>> {
         Ok(vec![Unit {
             path: self.dir.join(format!("{job_name}.unit")),

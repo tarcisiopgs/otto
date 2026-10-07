@@ -8,7 +8,7 @@ otto is a Rust CLI that runs coding agents (Claude Code, Codex) on a schedule. I
 
 It starts agents unattended on the user's machine, with the user's credentials. **Never add permission-bypassing flags to an agent command on otto's behalf.** What an agent may do comes from the job's `args`, written by the user.
 
-The user-facing overview and the roadmap are in `README.md`.
+The user-facing overview and the roadmap are in `README.md`, which is short on purpose: what otto is, how to start, and the few things worth knowing first. The detail of a behaviour goes in `docs/` (`terminal-ui.md`, `how-it-works.md`, `install.md`, `windows.md`), not in the README.
 
 ## Commands
 
@@ -17,19 +17,19 @@ cargo test                                   # the whole suite
 cargo clippy --all-targets -- -D warnings    # must be clean, CI enforces it
 cargo fmt                                    # CI runs cargo fmt --check
 cargo run -- --config examples/jobs.toml list
-cargo run -- --config examples/jobs.toml plan linear-updates
+cargo run -- --config examples/jobs.toml sync --dry-run
 ```
 
 CI (`.github/workflows/ci.yml`) runs Lint (macOS and Windows), Test (macOS, Linux and Windows), Build (every release target, with the steps `release.yml` uses, since that workflow only runs on a release) and `Windows Task Scheduler` for every pull request. The `check` job passes only when all of them pass.
 
 `Windows Task Scheduler` is the only place the Windows backend really runs: `scripts/windows-smoke.ps1` does a real `otto sync` on the runner, starts the task and reads its record back. There is no Windows machine to try a change on, so a change to `src/scheduler/windows.rs`, `src/which.rs` or how a run starts is not verified until that job passes.
 
-Do not load a unit into launchd or systemd, and do not run a job for real, while testing on a real machine unless the user asks for it in that conversation. That rules out a bare `otto sync`. `otto plan`, `otto sync --dry-run` and `otto run --dry-run` exist for that.
+Do not load a unit into launchd or systemd, and do not run a job for real, while testing on a real machine unless the user asks for it in that conversation. That rules out a bare `otto sync`. `otto sync --dry-run` and `otto run --dry-run` exist for that.
 
 ## Layout
 
 ```
-src/main.rs               CLI (clap): list, sync, plan, run, skip, pause, resume, runs, log; no subcommand opens the terminal UI
+src/main.rs               CLI (clap): list, sync, run, skip, pause, resume, runs, log; no subcommand opens the terminal UI
 src/store.rs              Store: per-job state (paused, skip next) and run records under the state directory
 src/run.rs                one run of a job: pause/skip/busy, start the agent, keep its output, close the record
 src/config.rs             jobs.toml: Config, Job, Schedule, Weekday; parsing, validation, path resolution

@@ -91,10 +91,6 @@ impl Scheduler for Launchd {
         remove_unit(&self.agents_dir.join(format!("{label}.plist")))
     }
 
-    fn name(&self) -> &'static str {
-        "launchd"
-    }
-
     fn units(&self, job_name: &str, job: &Job, ctx: &Context) -> Result<Vec<Unit>> {
         let (hour, minute) = job.schedule.time()?;
         let label = label(job_name);

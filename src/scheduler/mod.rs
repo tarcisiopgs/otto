@@ -51,8 +51,6 @@ impl Context {
 }
 
 pub trait Scheduler {
-    fn name(&self) -> &'static str;
-
     /// The files that make the OS run `<otto> run <job_name>` on the job's schedule.
     fn units(&self, job_name: &str, job: &Job, ctx: &Context) -> Result<Vec<Unit>>;
 
