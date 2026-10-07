@@ -3,6 +3,7 @@ mod atomic;
 mod config;
 mod jobs_file;
 mod next;
+mod notify;
 mod process;
 mod run;
 mod scheduler;

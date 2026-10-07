@@ -1159,6 +1159,7 @@ mod tests {
                     ],
                 },
                 args: vec!["--model".to_owned(), "sonnet".to_owned()],
+                notify: crate::notify::Level::default(),
             },
             state: State::default(),
             runs: Vec::new(),
