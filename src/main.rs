@@ -224,6 +224,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     Trigger::Manual
                 },
                 notify: job.notify,
+                expect: job.expect.as_deref(),
                 zone: &zone,
             };
             let patient = notify::Timed {

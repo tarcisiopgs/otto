@@ -14,11 +14,12 @@ workdir = "~/Workspace/app"            # where the agent runs
 schedule = { at = "16:05", days = ["mon", "tue", "wed", "thu", "fri"] }
 args = ["--permission-mode", "auto"]   # extra arguments for the agent CLI
 notify = "finish"                      # off | failures | finish | all; failures when left out
+expect = "UPDATES_SENT"                # the line a run that went well ends with; optional
 ```
 
 A scheduled run has nobody to answer permission prompts, so `args` is where the agent gets its permissions up front. otto adds none on its own.
 
-Leave `days` out for every day, and `notify` out to hear only of [failures](#notifications). [`examples/jobs.toml`](../examples/jobs.toml) is a starting point.
+Leave `days` out for every day, `notify` out to hear only of [failures](#notifications), and `expect` out to go by the exit code alone ([why you may want it](#a-run-that-exits-with-0-without-doing-its-job)). [`examples/jobs.toml`](../examples/jobs.toml) is a starting point.
 
 ## Commands
 
@@ -69,6 +70,14 @@ On macOS, at login launchd ties each job to the program its unit names, and kill
 
 Pause and skip need the unit `otto sync` writes today. After upgrading otto, run `otto sync` once, or answer the sync the terminal UI shows as not applied: a unit written by an older version starts the agent regardless. The unit carries the version of the otto that wrote it, so after an upgrade every job is one to reload.
 
+### A run that exits with 0 without doing its job
+
+An agent that gives up ("the tool was not available, so I stopped") exits with 0 like one that did the job, and the exit code is all otto reads. A job that has an `expect` is held to more: its run is `ok` only when the agent exits with 0 and the last line of the output that is not blank is that text. Otherwise the run is recorded as `failed (0)`, `otto log` ends with the reason, and the job tells of it as of any failure.
+
+The prompt is where the agent learns of the line: tell it to end with it when the job was done, and only then. Only the end of the output counts, because an agent such as Codex prints the prompt it was given, and the text is in there. A run that exits with something other than 0 is failed whatever it ends with.
+
+`expect` is read when the job runs, so changing it needs no `otto sync`. It is written by hand: the terminal UI has no field for it, and keeps the line when it changes the job.
+
 otto keeps the newest 50 runs of each job, in `~/.local/state/otto/jobs/<job>/` (`$XDG_STATE_HOME/otto/jobs` when that is set): a small file per run and its output beside it. Removing a job from the jobs file keeps its history. What otto itself prints during a scheduled run, such as a prompt file it could not read, goes to `~/.local/state/otto/logs/<job>.log`.
 
 ## Notifications
@@ -86,6 +95,6 @@ The notification names the job and what happened, `linear-updates failed`, and u
 
 otto uses what the system already has: `osascript` on macOS, `notify-send` on Linux, a PowerShell toast on Windows. On macOS the notification therefore comes in the name of Script Editor, and the first one may ask you to allow it. A notification that cannot be shown never changes a run: the reason is a line starting with `otto:` in the output of the run. otto waits five seconds for the system to take one and then goes on without it.
 
-Two things a notification does not know. A run that was interrupted, because the machine went down or the process was killed, tells nothing: no otto was left to tell. And an agent that exits with 0 without having done its job is an `ok` run, as it is everywhere else in otto.
+Two things a notification does not know. A run that was interrupted, because the machine went down or the process was killed, tells nothing: no otto was left to tell. And an agent that exits with 0 without having done its job is an `ok` run, as it is everywhere else in otto, unless the job has an [`expect`](#a-run-that-exits-with-0-without-doing-its-job).
 
 `notify` is read when the job runs. Changing it needs no `otto sync`, and the terminal UI has it as the last field of a job.

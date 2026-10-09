@@ -26,6 +26,8 @@ pub struct Request<'a> {
     pub trigger: Trigger,
     /// Which of its runs the job tells the user about.
     pub notify: Level,
+    /// The line the output of a run that went well ends with.
+    pub expect: Option<&'a str>,
     /// The time zone a notification gives the hour in.
     pub zone: &'a TimeZone,
 }
@@ -96,6 +98,26 @@ pub fn execute(
     // notification, the history has the run as it ended.
     match (request.command)().and_then(|argv| start(request, &argv, &log, &started)) {
         Ok(status) => {
+            // An agent that gave up exits with 0 like one that did the job.
+            // What tells them apart is how the job expects the output to end.
+            let unmet = request
+                .expect
+                .filter(|_| status.code() == Some(0))
+                .filter(|expect| !ends_with_line(&log, expect));
+            if let Some(expect) = unmet {
+                let reason = format!("exit 0, but the output does not end with {expect:?}");
+                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log) {
+                    let _ = writeln!(file, "otto: {reason}");
+                }
+                let done = store.finish_unmet(job, &run, now())?;
+                let event = Event::Failed {
+                    code: Some(0),
+                    seconds: done.seconds().unwrap_or(0),
+                    reason: Some(&reason),
+                };
+                tell(request, notifier, &event, Some(&log));
+                return Ok(1);
+            }
             let done = store.finish(job, &run, status.code(), now())?;
             let seconds = done.seconds().unwrap_or(0);
             let event = match status.code() {
@@ -129,6 +151,22 @@ pub fn execute(
             Err(error)
         }
     }
+}
+
+/// Whether the last line of the output kept in `log` that is not blank is
+/// `expect`. Only the end counts: an agent that prints the prompt it was
+/// given has the expected text in its output before it did anything.
+fn ends_with_line(log: &Path, expect: &str) -> bool {
+    let Ok(bytes) = std::fs::read(log) else {
+        return false;
+    };
+    let output = String::from_utf8_lossy(&bytes);
+    let last = output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty());
+    last == Some(expect.trim())
 }
 
 /// Tells the user of `event` when the job tells of it. A notification that
@@ -293,6 +331,7 @@ mod tests {
         store: Store,
         workdir: PathBuf,
         level: Level,
+        expect: Option<&'static str>,
         notifier: Recording,
     }
 
@@ -307,6 +346,7 @@ mod tests {
                 store,
                 workdir,
                 level: Level::default(),
+                expect: None,
                 notifier: Recording::default(),
             }
         }
@@ -341,6 +381,7 @@ mod tests {
                     workdir: &self.workdir,
                     trigger,
                     notify: self.level,
+                    expect: self.expect,
                     zone: &TimeZone::UTC,
                 },
                 &self.store,
@@ -805,6 +846,68 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    fn expecting(expect: &'static str, level: Level) -> World {
+        World {
+            expect: Some(expect),
+            ..World::telling(level)
+        }
+    }
+
+    #[test]
+    fn a_run_that_ends_as_expected_is_ok() {
+        let world = expecting("DONE", Level::Finish);
+        // The line may be indented and followed by blank ones.
+        let code = world
+            .run(Trigger::Scheduled, &sh("printf 'sent\\n  DONE \\n\\n'"))
+            .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(world.last().outcome, Outcome::Ok);
+        assert_eq!(world.told(), ["report ok: 0s"]);
+    }
+
+    #[test]
+    fn a_run_that_exits_with_0_and_ends_otherwise_is_failed() {
+        let world = expecting("DONE", Level::Failures);
+        let code = world
+            .run(Trigger::Scheduled, &sh("printf 'could not send\\n'"))
+            .unwrap();
+        assert_eq!(code, 1);
+        let run = world.last();
+        // The record keeps what the agent exited with.
+        assert_eq!((run.outcome, run.exit_code), (Outcome::Failed, Some(0)));
+        assert_eq!(run.outcome_label(), "failed (0)");
+        let reason = "exit 0, but the output does not end with \"DONE\"";
+        assert_eq!(world.log(&run), format!("could not send\notto: {reason}\n"));
+        assert_eq!(world.told(), [format!("report failed: {reason}")]);
+    }
+
+    #[test]
+    fn the_expected_line_counts_only_at_the_end() {
+        // An agent that prints its prompt has the line in its output before
+        // it did anything.
+        let world = expecting("DONE", Level::Off);
+        for script in [
+            "printf 'end with the line\\nDONE\\ngave up\\n'",
+            "printf 'gave up, no DONE\\n'",
+            "true",
+        ] {
+            let code = world.run(Trigger::Manual, &sh(script)).unwrap();
+            assert_eq!(code, 1, "{script}");
+            assert_eq!(world.last().outcome, Outcome::Failed, "{script}");
+        }
+    }
+
+    #[test]
+    fn a_run_that_failed_keeps_its_exit_code_whatever_it_ends_with() {
+        let world = expecting("DONE", Level::Failures);
+        let code = world
+            .run(Trigger::Scheduled, &sh("printf 'DONE\\n'; exit 3"))
+            .unwrap();
+        assert_eq!(code, 3);
+        assert_eq!(world.last().outcome_label(), "failed (3)");
+        assert_eq!(world.told(), ["report failed: exit 3 after 0s"]);
     }
 
     #[test]

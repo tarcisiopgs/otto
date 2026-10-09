@@ -145,13 +145,31 @@ impl Store {
         exit_code: Option<i32>,
         now: Timestamp,
     ) -> Result<Run> {
+        let outcome = if exit_code == Some(0) {
+            Outcome::Ok
+        } else {
+            Outcome::Failed
+        };
+        self.close(job, run, outcome, exit_code, now)
+    }
+
+    /// Closes as failed a run whose agent exited with 0 without its output
+    /// ending as the job expects: the record keeps the 0, `failed (0)`.
+    pub fn finish_unmet(&self, job: &str, run: &Run, now: Timestamp) -> Result<Run> {
+        self.close(job, run, Outcome::Failed, Some(0), now)
+    }
+
+    fn close(
+        &self,
+        job: &str,
+        run: &Run,
+        outcome: Outcome,
+        exit_code: Option<i32>,
+        now: Timestamp,
+    ) -> Result<Run> {
         let done = Run {
             finished: Some(now),
-            outcome: if exit_code == Some(0) {
-                Outcome::Ok
-            } else {
-                Outcome::Failed
-            },
+            outcome,
             exit_code,
             ..run.clone()
         };

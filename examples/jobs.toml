@@ -12,6 +12,10 @@ args = ["--permission-mode", "auto"]
 # Which runs show a notification: off, failures, finish or all. A job
 # without this line tells of failures.
 notify = "finish"
+# The line the output of a run ends with when the job was done, as the prompt
+# asks of the agent. With it, a run that exits with 0 and ends in anything
+# else is a failed run.
+# expect = "UPDATES_SENT"
 
 [jobs.morning-triage]
 agent = "codex"
