@@ -20,7 +20,9 @@ cargo run -- --config examples/jobs.toml list
 cargo run -- --config examples/jobs.toml sync --dry-run
 ```
 
-CI (`.github/workflows/ci.yml`) runs Lint (macOS and Windows), Test (macOS, Linux and Windows), Build (every release target, with the steps `release.yml` uses, since that workflow only runs on a release) and `Windows Task Scheduler` for every pull request. The `check` job passes only when all of them pass.
+CI (`.github/workflows/ci.yml`) runs Lint (macOS and Windows), Test (macOS, Linux and Windows), Build (every release target, with the steps `release.yml` uses, since that workflow only runs on a release), `Windows Task Scheduler`, `Minimum Rust version` (a `cargo check` with the `rust-version` of `Cargo.toml`) and `Audit` (`cargo audit` over `Cargo.lock`) for every pull request. The `check` job passes only when all of them pass.
+
+In a workflow an action is named by its commit, with the version in a comment beside it (`actions/checkout@<sha> # v4.4.0`): a tag can be moved to other code. `dtolnay/rust-toolchain` takes the toolchain from the name of the ref it is called by, so pinned to a commit it needs `toolchain:` said.
 
 `Windows Task Scheduler` is the only place the Windows backend really runs: `scripts/windows-smoke.ps1` does a real `otto sync` on the runner, starts the task and reads its record back. There is no Windows machine to try a change on, so a change to `src/scheduler/windows.rs`, `src/which.rs` or how a run starts is not verified until that job passes.
 

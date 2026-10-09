@@ -15,6 +15,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+      # For the attestation of what is built: see the last step.
+      id-token: write
+      attestations: write
     strategy:
       # One target failing must not cancel the others before they attach their
       # archives.
@@ -38,9 +41,10 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - name: Check the tag matches Cargo.toml
         run: |
@@ -74,6 +78,7 @@ jobs:
             sum=$(shasum -a 256 "$archive" | cut -d " " -f 1)
           fi
           printf "%s  %s\n" "$sum" "$archive" > "$archive.sha256"
+          cat "$archive.sha256" >> checksums.txt
           gh release upload "$TAG" "$archive" "$archive.sha256" --clobber
       - name: Attach the .deb to the release
         if: contains(matrix.target, 'linux')
@@ -86,7 +91,19 @@ jobs:
           scripts/build-deb.sh "target/$TARGET/release/otto" "$version" "$arch" deb
           deb="otto_${version}_$arch.deb"
           (cd deb && sha256sum "$deb" > "$deb.sha256")
+          cat "deb/$deb.sha256" >> checksums.txt
           gh release upload "$TAG" "deb/$deb" "deb/$deb.sha256" --clobber
+      # Says, signed through GitHub, that the files attached above were built
+      # by this workflow from this commit. Whoever downloads one checks it with
+      # `gh attestation verify <file> --repo tarcisiopgs/otto`. It is kept by
+      # GitHub, not attached: the files of the release are the same as before.
+      # It comes last and may fail: a release is not held back by what is an
+      # extra, and the npm package is published all the same.
+      - name: Attest what was built
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        continue-on-error: true
+        with:
+          subject-checksums: checksums.txt
 
   npm:
     name: Publish to npm
@@ -99,8 +116,8 @@ jobs:
       TAG: ${{ github.event.release.tag_name }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
