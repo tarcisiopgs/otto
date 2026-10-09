@@ -50,6 +50,20 @@ pub fn write(path: &Path, text: &str) -> Result<()> {
     fs::rename(&temporary, path).with_context(cannot_write)
 }
 
+/// Makes `dir`, with what is missing above it, and on a Unix leaves it to its
+/// owner alone. A directory that is already there is closed too: one made by
+/// an older otto was open to every user of the machine.
+pub fn private_dir(dir: &Path) -> Result<()> {
+    let cannot_create = || format!("cannot create {}", dir.display());
+    fs::create_dir_all(dir).with_context(cannot_create)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).with_context(cannot_create)?;
+    }
+    Ok(())
+}
+
 /// Where `path` leads when it is a link, the file it points at need not exist
 /// yet. `None` when it is not a link.
 fn follow(path: &Path) -> Option<PathBuf> {
@@ -119,6 +133,20 @@ mod unix_tests {
                 .is_symlink()
         );
         assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+    }
+
+    #[test]
+    fn a_private_directory_is_its_owners_alone_even_when_it_was_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let made = dir.path().join("state").join("jobs");
+        private_dir(&made).unwrap();
+        assert_eq!(mode(&made), 0o700);
+
+        // One an older otto made, open to everyone.
+        fs::set_permissions(&made, fs::Permissions::from_mode(0o755)).unwrap();
+        private_dir(&made).unwrap();
+        assert_eq!(mode(&made), 0o700);
     }
 
     /// What an interrupted write may have left beside the file.

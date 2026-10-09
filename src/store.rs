@@ -93,9 +93,19 @@ impl Store {
         toml::from_str(&text).with_context(|| format!("invalid {}", path.display()))
     }
 
+    /// The job's directory, there and its owner's alone: the output of a run
+    /// holds whatever the agent read, and no other user of the machine has
+    /// any business with it.
+    fn private_job_dir(&self, job: &str) -> Result<PathBuf> {
+        atomic::private_dir(&self.root)?;
+        let dir = self.job_dir(job);
+        atomic::private_dir(&dir)?;
+        Ok(dir)
+    }
+
     pub fn set_state(&self, job: &str, state: State) -> Result<()> {
         let text = toml::to_string(&state).context("cannot encode the job state")?;
-        atomic::write(&self.job_dir(job).join("state.toml"), &text)
+        atomic::write(&self.private_job_dir(job)?.join("state.toml"), &text)
     }
 
     /// Opens the record of a run that is about to start the agent.
@@ -297,7 +307,8 @@ impl Store {
 
     fn write(&self, job: &str, run: &Run) -> Result<()> {
         let text = toml::to_string(run).context("cannot encode the run record")?;
-        atomic::write(&self.job_dir(job).join(format!("{}.toml", run.id)), &text)
+        let dir = self.private_job_dir(job)?;
+        atomic::write(&dir.join(format!("{}.toml", run.id)), &text)
     }
 
     fn prune(&self, job: &str) -> Result<()> {

@@ -1,8 +1,8 @@
 //! One run of a job: decide whether it happens, start the agent, keep its
 //! output and close the record.
 
-use std::fs::OpenOptions;
-use std::io::{self, Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek as _, SeekFrom, Write};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -106,7 +106,7 @@ pub fn execute(
                 .filter(|expect| !ends_with_line(&log, expect));
             if let Some(expect) = unmet {
                 let reason = format!("exit 0, but the output does not end with {expect:?}");
-                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log) {
+                if let Ok(mut file) = append(&log) {
                     let _ = writeln!(file, "otto: {reason}");
                 }
                 let done = store.finish_unmet(job, &run, now())?;
@@ -136,7 +136,7 @@ pub fn execute(
             })
         }
         Err(error) => {
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log) {
+            if let Ok(mut file) = append(&log) {
                 let _ = writeln!(file, "otto: {error:#}");
             }
             // Closed here, or the job would count as running until someone looked.
@@ -157,7 +157,18 @@ pub fn execute(
 /// `expect`. Only the end counts: an agent that prints the prompt it was
 /// given has the expected text in its output before it did anything.
 fn ends_with_line(log: &Path, expect: &str) -> bool {
-    let Ok(bytes) = std::fs::read(log) else {
+    // The output of a long run is large and only its end is looked at. A
+    // character cut in two by where the reading starts is in the first line
+    // read, never in the last.
+    let read = || -> io::Result<Vec<u8>> {
+        let mut file = File::open(log)?;
+        let length = file.metadata()?.len();
+        file.seek(SeekFrom::Start(length.saturating_sub(TAIL)))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    };
+    let Ok(bytes) = read() else {
         return false;
     };
     let output = String::from_utf8_lossy(&bytes);
@@ -167,6 +178,22 @@ fn ends_with_line(log: &Path, expect: &str) -> bool {
         .map(str::trim)
         .find(|line| !line.is_empty());
     last == Some(expect.trim())
+}
+
+/// How much of the end of the output is read to find its last line.
+const TAIL: u64 = 64 * 1024;
+
+/// Opens the output of a run to add to it. A file made here is its owner's
+/// alone: it holds whatever the agent read.
+fn append(log: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(log)
 }
 
 /// Tells the user of `event` when the job tells of it. A notification that
@@ -180,7 +207,7 @@ fn tell(request: &Request, notifier: &dyn Notifier, event: &Event, log: Option<&
         return;
     };
     let line = format!("otto: cannot notify: {error:#}");
-    let kept = log.and_then(|log| OpenOptions::new().create(true).append(true).open(log).ok());
+    let kept = log.and_then(|log| append(log).ok());
     match kept {
         Some(mut file) => {
             let _ = writeln!(file, "{line}");
@@ -200,11 +227,7 @@ fn start(request: &Request, argv: &[String], log: &Path, started: &dyn Fn()) -> 
     }
     // Appending, because the agent is not the only one that writes here: a
     // line of otto's own must not be written over.
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log)
-        .with_context(|| format!("cannot write {}", log.display()))?;
+    let file = append(log).with_context(|| format!("cannot write {}", log.display()))?;
     let mut command = command_for(program);
     // No terminal is attached on a scheduled run, so the agent gets no stdin.
     command
@@ -244,7 +267,9 @@ fn start(request: &Request, argv: &[String], log: &Path, started: &dyn Fn()) -> 
         copies += 1;
     }
     if let Some(stderr) = child.stderr.take() {
-        let (done, log) = (done.clone(), log.to_path_buf());
+        // The last sender: once both copies are done the channel is closed,
+        // with what they sent still there to be received.
+        let log = log.to_path_buf();
         thread::spawn(move || {
             tee(stderr, io::stderr(), &log);
             let _ = done.send(());
@@ -846,6 +871,32 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn what_a_run_leaves_is_its_owners_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let world = World::new();
+        world.run(Trigger::Scheduled, &sh("printf secret")).unwrap();
+        let log = world.store.log_path("report", &world.last().id).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&log), 0o600);
+        assert_eq!(mode(log.parent().unwrap()), 0o700);
+    }
+
+    #[test]
+    fn the_expected_line_is_found_at_the_end_of_a_long_output() {
+        // More than is read of the end, in lines of a character that takes
+        // three bytes, so that the reading starts inside one.
+        let world = expecting("DONE", Level::Off);
+        let script = "yes 'あいうえお' | head -n 20000; printf 'DONE\\n'";
+        assert_eq!(world.run(Trigger::Scheduled, &sh(script)).unwrap(), 0);
+        assert_eq!(world.last().outcome, Outcome::Ok);
+
+        let script = "printf 'DONE\\n'; yes 'あいうえお' | head -n 20000";
+        assert_eq!(world.run(Trigger::Scheduled, &sh(script)).unwrap(), 1);
+        assert_eq!(world.last().outcome, Outcome::Failed);
     }
 
     fn expecting(expect: &'static str, level: Level) -> World {
