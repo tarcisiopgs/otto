@@ -135,9 +135,10 @@ fn load(name: &str, units: &[Unit], scheduler: &dyn Scheduler, runner: &dyn Runn
 }
 
 /// The scheduler appends to the log file but does not create its directory.
+/// It makes the file as it pleases, so the directory is what keeps the other
+/// users of the machine out.
 fn prepare_logs(ctx: &Context) -> Result<()> {
-    fs::create_dir_all(&ctx.log_dir)
-        .with_context(|| format!("cannot create {}", ctx.log_dir.display()))
+    crate::atomic::private_dir(&ctx.log_dir)
 }
 
 /// Makes the scheduler match `config`: jobs are added, updated or left alone,
