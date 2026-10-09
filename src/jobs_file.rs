@@ -1367,6 +1367,18 @@ schedule = { at = \"09:00\" }
     }
 
     #[test]
+    fn a_key_written_by_hand_survives_a_change_of_the_job() {
+        // `expect` is not a field of the form: a change leaves it where it is.
+        let by_hand = format!("{SAMPLE}expect = \"DONE\"\n");
+        let louder = JobSpec {
+            notify: Level::All,
+            ..read(&by_hand, "morning-triage").unwrap()
+        };
+        let text = update(&by_hand, "morning-triage", &louder).unwrap();
+        assert_eq!(text, format!("{by_hand}notify = \"all\"\n"));
+    }
+
+    #[test]
     fn a_level_that_is_not_the_default_is_written() {
         let louder = JobSpec {
             notify: Level::All,

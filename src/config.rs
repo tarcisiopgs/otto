@@ -31,6 +31,10 @@ pub struct Job {
     /// Which of its runs the job tells the user about.
     #[serde(default)]
     pub notify: Level,
+    /// The line the output of a run ends with when the run went well. A run
+    /// that exits with 0 and ends in anything else is a failed run.
+    #[serde(default)]
+    pub expect: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,6 +161,12 @@ impl Config {
             job.schedule.time().with_context(|| format!("job {name}"))?;
             if job.schedule.days.is_empty() {
                 bail!("job {name}: schedule.days cannot be empty");
+            }
+            // Matched against one line: a blank one or two would never be met.
+            if let Some(expect) = &job.expect
+                && (expect.trim().is_empty() || expect.contains('\n'))
+            {
+                bail!("job {name}: expect must be one line of text, got {expect:?}");
             }
             job.prompt = resolve(&job.prompt, base, home);
             job.workdir = resolve(&job.workdir, base, home);
@@ -291,6 +301,33 @@ mod tests {
         for level in Level::ALL {
             let text = with_notify(&format!("notify = \"{}\"\n", level.label()));
             assert_eq!(parse(&text).unwrap().job("nightly").unwrap().notify, level);
+        }
+    }
+
+    #[test]
+    fn a_job_says_how_its_output_ends() {
+        let config = parse(&with_notify("")).unwrap();
+        assert_eq!(config.job("nightly").unwrap().expect, None);
+        let config = parse(&with_notify("expect = \"DONE\"\n")).unwrap();
+        assert_eq!(
+            config.job("nightly").unwrap().expect.as_deref(),
+            Some("DONE")
+        );
+    }
+
+    #[test]
+    fn an_expected_line_that_can_never_be_met_is_refused() {
+        for line in [
+            "expect = \"\"\n",
+            "expect = \"  \"\n",
+            "expect = \"a\\nb\"\n",
+        ] {
+            let error = parse(&with_notify(line)).unwrap_err();
+            let said = format!("{error:#}");
+            assert!(
+                said.contains("job nightly: expect must be one line of text"),
+                "{said}"
+            );
         }
     }
 

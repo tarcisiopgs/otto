@@ -910,6 +910,7 @@ mod tests {
                 },
                 args: Vec::new(),
                 notify: crate::notify::Level::default(),
+                expect: None,
             },
             state: State::default(),
             runs: Vec::new(),
