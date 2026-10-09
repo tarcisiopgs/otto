@@ -80,6 +80,8 @@ The prompt is where the agent learns of the line: tell it to end with it when th
 
 otto keeps the newest 50 runs of each job, in `~/.local/state/otto/jobs/<job>/` (`$XDG_STATE_HOME/otto/jobs` when that is set): a small file per run and its output beside it. Removing a job from the jobs file keeps its history. What otto itself prints during a scheduled run, such as a prompt file it could not read, goes to `~/.local/state/otto/logs/<job>.log`.
 
+The output of a run holds whatever the agent read, so on macOS and Linux these directories are their owner's alone (`0700`), and so is the output of each run (`0600`). Directories an older otto made open are closed by the next run of the job, and the one of the scheduler's logs by the next `otto sync`.
+
 ## Notifications
 
 A run that needs your attention shows a notification on the machine it ran on. How much a job tells is its `notify`:
