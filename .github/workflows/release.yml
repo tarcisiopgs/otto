@@ -13,6 +13,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     permissions:
       contents: write
       # For the attestation of what is built: see the last step.
@@ -109,6 +110,7 @@ jobs:
     name: Publish to npm
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write

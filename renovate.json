@@ -2,7 +2,8 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "description": [
     "Dependency updates for otto: the Rust crate and the GitHub Actions workflows.",
-    "Renovate merges, not GitHub (platformAutomerge: false). Native auto-merge lands every ready PR at the same instant, and two PRs that both touch Cargo.lock would conflict. Renovate merges one branch per run, always rebased on main."
+    "Renovate merges, not GitHub (platformAutomerge: false). Native auto-merge lands every ready PR at the same instant, and two PRs that both touch Cargo.lock would conflict. Renovate merges one branch per run.",
+    "rebaseWhen auto: a PR that merges on its own is rebased whenever it falls behind main, so it is tested against the main it will land on; a PR that waits for review is rebased only when it conflicts, so it does not rerun CI on every merge to main while nobody is looking at it."
   ],
   "extends": [
     "config:recommended",
@@ -25,7 +26,7 @@
     "tarcisiopgs"
   ],
   "assignAutomerge": true,
-  "rebaseWhen": "behind-base-branch",
+  "rebaseWhen": "auto",
   "minimumReleaseAge": "3 days",
   "internalChecksFilter": "strict",
   "prConcurrentLimit": 3,
