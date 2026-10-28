@@ -21,6 +21,7 @@ jobs:
   lint:
     name: Lint (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       matrix:
         os: [macos-latest, windows-latest]
@@ -38,6 +39,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
@@ -54,6 +56,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -112,6 +115,7 @@ jobs:
   windows:
     name: Windows Task Scheduler
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
@@ -128,6 +132,7 @@ jobs:
   msrv:
     name: Minimum Rust version
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Read rust-version from Cargo.toml
@@ -148,6 +153,7 @@ jobs:
   audit:
     name: Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
@@ -161,6 +167,7 @@ jobs:
     if: always()
     needs: [lint, test, build, windows, msrv, audit]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       # Require `success` from every job instead of listing the bad results: a job
       # no runner ever picked up ends as cancelled, yet the old
